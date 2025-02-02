@@ -2,7 +2,7 @@
 
 # The container image to deploy
 image:
-  repository: "renatogalera/openport-exporter"  # <-- Example valid repository
+  repository: "renatogalera/openport-exporter"  
   tag: "v0.1.0"
   pullPolicy: "IfNotPresent"
 
