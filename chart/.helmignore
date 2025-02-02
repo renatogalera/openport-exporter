@@ -1,0 +1,17 @@
+*.go
+go.mod
+go.sum
+
+Dockerfile
+
+config.yaml
+*.out
+*.log
+
+README.MD
+
+.git/
+
+/config/
+/metrics/
+/scanner/
