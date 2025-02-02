@@ -15,7 +15,11 @@ type MetricsCollector struct {
 	scanDuration        *prometheus.GaugeVec
 	taskQueueSizeMetric prometheus.Gauge
 	scanTimeouts        *prometheus.CounterVec
-	scannedTargets      sync.Map
+
+	// New gauge to capture how many workers are busy at a given time.
+	workerUtilization *prometheus.GaugeVec
+
+	scannedTargets sync.Map
 }
 
 // NewMetricsCollector creates and initializes a new MetricsCollector.
@@ -55,6 +59,13 @@ func NewMetricsCollector() *MetricsCollector {
 			},
 			[]string{"target", "port_range", "protocol"},
 		),
+		workerUtilization: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "worker_utilization",
+				Help: "Number of currently busy workers out of the total worker pool",
+			},
+			[]string{"state"}, // e.g. state could be "busy"
+		),
 	}
 
 	return mc
@@ -67,6 +78,7 @@ func (mc *MetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	mc.scanDuration.Describe(ch)
 	mc.taskQueueSizeMetric.Describe(ch)
 	mc.scanTimeouts.Describe(ch)
+	mc.workerUtilization.Describe(ch)
 }
 
 // Collect is called by the Prometheus registry when collecting metrics.
@@ -76,6 +88,7 @@ func (mc *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	mc.scanDuration.Collect(ch)
 	mc.taskQueueSizeMetric.Collect(ch)
 	mc.scanTimeouts.Collect(ch)
+	mc.workerUtilization.Collect(ch)
 }
 
 // ScanInfo holds information about a scan.
@@ -126,6 +139,12 @@ func (mc *MetricsCollector) ObserveScanDuration(target, portRange, protocol stri
 // UpdateTaskQueueSize updates the task queue size metric.
 func (mc *MetricsCollector) UpdateTaskQueueSize(queueSize int) {
 	mc.taskQueueSizeMetric.Set(float64(queueSize))
+}
+
+// UpdateWorkerUtilization sets the number of busy workers in the metric.
+func (mc *MetricsCollector) UpdateWorkerUtilization(busy int) {
+	// We track how many are busy at the moment
+	mc.workerUtilization.WithLabelValues("busy").Set(float64(busy))
 }
 
 // ------------------- PRIVATE METHODS -------------------
