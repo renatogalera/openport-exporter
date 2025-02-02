@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"openport-exporter/config"
-	"openport-exporter/scanner"
 	"testing"
+
+	"github.com/renatogalera/openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/scanner"
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"

@@ -3,8 +3,9 @@ package healthcheck
 import (
 	"fmt"
 	"net/http"
-	"openport-exporter/config"
-	"openport-exporter/scanner"
+
+	"github.com/renatogalera/openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/scanner"
 
 	"github.com/sirupsen/logrus"
 )
