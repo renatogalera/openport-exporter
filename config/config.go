@@ -69,21 +69,14 @@ func LoadConfig(filename string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	var cfg Config
 	if err := yaml.UnmarshalStrict(content, &cfg); err != nil {
 		return nil, err
 	}
-
 	// Allow 0 for ephemeral; reject negative or anything > 65535.
 	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
 		return nil, fmt.Errorf("invalid server port: %d", cfg.Server.Port)
 	}
-
-	// If config says 0, we accept ephemeral. If you prefer to keep a minimum
-	// of, say 1024, or disallow ephemeral for production, you can do so.
-	// But for the tests to pass, simply allow 0.
-
 	if cfg.Scanning.Interval < 600 {
 		cfg.Scanning.Interval = DefaultScanInterval
 	}
@@ -105,7 +98,6 @@ func LoadConfig(filename string) (*Config, error) {
 	if cfg.Scanning.MaxCIDRSize <= 0 || cfg.Scanning.MaxCIDRSize > 128 {
 		cfg.Scanning.MaxCIDRSize = DefaultMaxCIDRSize
 	}
-
 	return &cfg, nil
 }
 

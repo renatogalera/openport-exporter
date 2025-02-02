@@ -15,11 +15,8 @@ type MetricsCollector struct {
 	scanDuration        *prometheus.GaugeVec
 	taskQueueSizeMetric prometheus.Gauge
 	scanTimeouts        *prometheus.CounterVec
-
-	// New gauge to capture how many workers are busy at a given time.
-	workerUtilization *prometheus.GaugeVec
-
-	scannedTargets sync.Map
+	workerUtilization   *prometheus.GaugeVec
+	scannedTargets      sync.Map
 }
 
 // NewMetricsCollector creates and initializes a new MetricsCollector.
@@ -64,10 +61,9 @@ func NewMetricsCollector() *MetricsCollector {
 				Name: "worker_utilization",
 				Help: "Number of currently busy workers out of the total worker pool",
 			},
-			[]string{"state"}, // e.g. state could be "busy"
+			[]string{"state"},
 		),
 	}
-
 	return mc
 }
 
@@ -100,11 +96,9 @@ type ScanInfo struct {
 // UpdateMetrics updates the metrics with new scan results.
 func (mc *MetricsCollector) UpdateMetrics(targetKey string, newResults map[string]struct{}) {
 	prevScanInfo := mc.getPreviousScanInfo(targetKey)
-
 	mc.updateNewOpenPorts(newResults)
 	mc.updateClosedPorts(prevScanInfo.Ports, newResults)
 	mc.updateOpenPortsTotal(prevScanInfo.Ports, newResults)
-
 	mc.storeCurrentScanInfo(targetKey, newResults)
 }
 
@@ -143,7 +137,6 @@ func (mc *MetricsCollector) UpdateTaskQueueSize(queueSize int) {
 
 // UpdateWorkerUtilization sets the number of busy workers in the metric.
 func (mc *MetricsCollector) UpdateWorkerUtilization(busy int) {
-	// We track how many are busy at the moment
 	mc.workerUtilization.WithLabelValues("busy").Set(float64(busy))
 }
 
@@ -183,8 +176,6 @@ func (mc *MetricsCollector) updateClosedPorts(prevPorts, newResults map[string]s
 
 func (mc *MetricsCollector) updateOpenPortsTotal(prevPorts, newPorts map[string]struct{}) {
 	ipPortCount := make(map[string]int)
-
-	// Count open ports for each IP in newPorts
 	for portKey := range newPorts {
 		parts := strings.Split(portKey, ":")
 		if len(parts) == 2 {
@@ -192,13 +183,9 @@ func (mc *MetricsCollector) updateOpenPortsTotal(prevPorts, newPorts map[string]
 			ipPortCount[ip]++
 		}
 	}
-
-	// Update the metric with the count of open ports per IP
 	for ip, count := range ipPortCount {
 		mc.openPortsTotal.WithLabelValues(ip).Set(float64(count))
 	}
-
-	// Find IPs that had open ports previously but not now, and set their counts to zero
 	prevIPs := extractIPsFromPorts(prevPorts)
 	for ip := range prevIPs {
 		if _, stillOpen := ipPortCount[ip]; !stillOpen {
