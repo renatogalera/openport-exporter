@@ -1,5 +1,7 @@
 # Default values for openport-exporter
 
+fullnameOverride: "openport-exporter"
+
 # The container image to deploy
 image:
   repository: "renatogalera/openport-exporter"  
