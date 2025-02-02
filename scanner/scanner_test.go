@@ -128,7 +128,8 @@ func TestProcessNmapResults(t *testing.T) {
 		"192.168.1.1:80": {},
 	}
 
-	newResults := processNmapResults(result, task)
+	// Updated call: pass a logger instance as third argument.
+	newResults := processNmapResults(result, task, logrus.New())
 	if !reflect.DeepEqual(newResults, expectedResults) {
 		t.Errorf("Expected %v, got %v", expectedResults, newResults)
 	}

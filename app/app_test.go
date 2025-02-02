@@ -143,8 +143,8 @@ func TestStartServer(t *testing.T) {
 
 	// Inicia o servidor em uma goroutine separada
 	go func() {
-		if err := app.StartServer(); err != nil {
-			t.Errorf("StartServer returned an error: %v", err)
+		if err := app.Start(); err != nil {
+			t.Errorf("Start returned an error: %v", err)
 		}
 	}()
 
