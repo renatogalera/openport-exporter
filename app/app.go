@@ -1,5 +1,3 @@
-// file: app/app.go
-
 package app
 
 import (
@@ -7,6 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"openport-exporter/config"
@@ -54,21 +55,63 @@ func NewApp(configPath string, reg prometheus.Registerer) (*App, error) {
 		MetricsCollector: metricsCollector,
 		TaskQueue:        make(chan scanner.ScanTask, cfg.Performance.TaskQueueSize),
 		RateLimiter:      setupRateLimiter(cfg),
-
 		// Create a fresh mux
 		Mux: http.NewServeMux(),
 	}, nil
 }
 
-// Run starts the workers, enqueues tasks, sets up HTTP handlers, and starts the server.
+// Run starts the workers, enqueues tasks, sets up HTTP handlers, and starts the server with graceful shutdown.
 func (a *App) Run() error {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	a.StartWorkers(ctx)
+	// Listen for OS signals for graceful shutdown.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	// Start workers (injecting our logger) and enqueue tasks.
+	go scanner.StartWorkers(ctx, a.Config.Performance.WorkerCount, a.TaskQueue, a.Config, a.MetricsCollector, a.Log)
 	go a.enqueueScanTasks(ctx)
 
 	a.SetupHTTPHandlers()
-	return a.StartServer()
+
+	// Create an HTTP server.
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", a.Config.Server.Port),
+		Handler: a.Mux,
+	}
+
+	// Start the server in a separate goroutine.
+	serverErrCh := make(chan error, 1)
+	go func() {
+		a.Log.WithField("address", srv.Addr).Info("Metrics server starting")
+		serverErrCh <- srv.ListenAndServe()
+	}()
+
+	// Wait for a shutdown signal or a server error.
+	select {
+	case sig := <-sigCh:
+		a.Log.WithField("signal", sig).Info("Shutdown signal received")
+	case err := <-serverErrCh:
+		if err != nil && err != http.ErrServerClosed {
+			return err
+		}
+	}
+
+	// Initiate graceful shutdown.
+	cancel()
+	ctxShutdown, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := srv.Shutdown(ctxShutdown); err != nil {
+		a.Log.Error("Server Shutdown:", err)
+	}
+
+	// Close the task queue so that workers can exit.
+	close(a.TaskQueue)
+
+	a.Log.Info("Server gracefully stopped")
+	return nil
 }
 
 // setupLogger configures and returns a new logrus logger.
@@ -84,21 +127,14 @@ func loadConfiguration(log *logrus.Logger, configPath string) (*config.Config, e
 	if err != nil {
 		return nil, err
 	}
-
 	log.WithField("task_queue_size", cfg.Performance.TaskQueueSize).Info("Task queue size")
 	return cfg, nil
 }
 
 // setupRateLimiter creates a rate limiter based on config.
 func setupRateLimiter(cfg *config.Config) *rate.Limiter {
-	// If RateLimit = N, the user wants N requests per minute -> N/60 per second
+	// If RateLimit = N, the user wants N requests per minute -> N/60 per second.
 	return rate.NewLimiter(rate.Limit(cfg.Performance.RateLimit)/60.0, cfg.Performance.RateLimit)
-}
-
-// StartWorkers launches goroutines to process scan tasks from TaskQueue.
-func (a *App) StartWorkers(ctx context.Context) {
-	a.Log.Info("Starting workers")
-	scanner.StartWorkers(ctx, a.Config.Performance.WorkerCount, a.TaskQueue, a.Config, a.MetricsCollector)
 }
 
 // enqueueScanTasks periodically queues scan tasks for each configured target.
@@ -121,12 +157,10 @@ func (a *App) enqueueScanTasks(ctx context.Context) {
 // processTarget decides if a target should be enqueued for scanning.
 func (a *App) processTarget(ctx context.Context, target string) {
 	targetKey := createTargetKey(target, a.Config.Scanning.PortRange)
-
 	if !a.MetricsCollector.CanScan(targetKey, a.Config.GetScanIntervalDuration()) {
 		a.Log.WithField("target", targetKey).Info("Ignoring scan due to interval not reached")
 		return
 	}
-
 	if err := a.enqueueScanTask(ctx, target); err != nil {
 		a.handleEnqueueError(err, target)
 	} else {
@@ -139,11 +173,8 @@ func createTargetKey(target, portRange string) string {
 	return target + "_" + portRange
 }
 
-// enqueueScanTask puts a new ScanTask in the TaskQueue (splitting if CIDR).
 func (a *App) enqueueScanTask(ctx context.Context, target string) error {
-	return scanner.EnqueueScanTask(
-		ctx, a.TaskQueue, target, a.Config.Scanning.PortRange, "tcp", a.Config.Scanning.MaxCIDRSize,
-	)
+	return scanner.EnqueueScanTask(ctx, a.TaskQueue, target, a.Config.Scanning.PortRange, "tcp", a.Config.Scanning.MaxCIDRSize)
 }
 
 func (a *App) handleEnqueueError(err error, target string) {
@@ -157,7 +188,7 @@ func (a *App) logScanEnqueued(target string) {
 	a.Log.WithField("target", target).Info("Scan enqueued successfully")
 }
 
-// SetupHTTPHandlers registers our HTTP endpoints on the default mux.
+// SetupHTTPHandlers registers our HTTP endpoints on the mux.
 func (a *App) SetupHTTPHandlers() {
 	a.Mux.HandleFunc("/query", scanner.HandleQuery(a.Config, a.RateLimiter, a.Log, a.TaskQueue, a.MetricsCollector))
 	a.Mux.Handle("/metrics", promhttp.Handler())
@@ -177,4 +208,18 @@ func (a *App) StartServer() error {
 
 	a.Log.WithField("address", ln.Addr().String()).Info("Metrics server started")
 	return http.Serve(ln, a.Mux)
+}
+
+// --------------------------------------------------------------------------
+// Additional wrapper methods added to support tests
+// --------------------------------------------------------------------------
+
+// StartWorkers is a wrapper that starts scan workers.
+func (a *App) StartWorkers(ctx context.Context) {
+	scanner.StartWorkers(ctx, a.Config.Performance.WorkerCount, a.TaskQueue, a.Config, a.MetricsCollector, a.Log)
+}
+
+// Start is a wrapper method to start the HTTP server.
+func (a *App) Start() error {
+	return a.StartServer()
 }

@@ -37,7 +37,6 @@ func EnqueueScanTask(ctx context.Context, taskQueue chan ScanTask, target, portR
 	if err != nil {
 		return fmt.Errorf("failed to split target into subnets: %w", err)
 	}
-
 	for _, subnet := range subnets {
 		select {
 		case <-ctx.Done():
@@ -47,18 +46,17 @@ func EnqueueScanTask(ctx context.Context, taskQueue chan ScanTask, target, portR
 			PortRange: portRange,
 			Protocol:  protocol,
 		}:
-			// The queue size is updated in the worker after consumption
+			// Task enqueued successfully.
 		}
 	}
-
 	return nil
 }
 
 // StartWorkers starts worker goroutines to process scan tasks concurrently.
-func StartWorkers(ctx context.Context, workerCount int, taskQueue chan ScanTask, cfg *config.Config, metricsCollector *metrics.MetricsCollector) {
+func StartWorkers(ctx context.Context, workerCount int, taskQueue chan ScanTask, cfg *config.Config, metricsCollector *metrics.MetricsCollector, log *logrus.Logger) {
 	semaphore := make(chan struct{}, workerCount)
 	for i := 0; i < workerCount; i++ {
-		go worker(ctx, taskQueue, cfg, semaphore, metricsCollector)
+		go worker(ctx, taskQueue, cfg, semaphore, metricsCollector, log)
 	}
 }
 
@@ -67,30 +65,24 @@ func HandleQuery(cfg *config.Config, rateLimiter *rate.Limiter, log *logrus.Logg
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		logRequestReceived(r, log)
-
 		if !checkRateLimit(ctx, rateLimiter, w, log) {
 			return
 		}
-
 		ipRange, portRange, protocol, err := parseQueryParams(r)
 		if err != nil {
 			handleBadRequest(w, log, err)
 			return
 		}
-
 		targetKey := createTargetKey(ipRange, portRange)
-
 		if !metricsCollector.CanScan(targetKey, cfg.GetScanIntervalDuration()) {
 			log.WithFields(logrus.Fields{"target": targetKey}).Info("Skipping scan, interval not reached")
 			jsonResponse(w, Response{Status: "skipped", Message: "Scan interval not reached"}, http.StatusAccepted)
 			return
 		}
-
 		if err := EnqueueScanTask(ctx, taskQueue, ipRange, portRange, protocol, cfg.Scanning.MaxCIDRSize); err != nil {
 			handleEnqueueError(w, log, err, ipRange, portRange, protocol)
 			return
 		}
-
 		metricsCollector.RegisterScan(targetKey)
 		handleSuccessResponse(w, log, ipRange, portRange, protocol)
 	}
@@ -98,62 +90,62 @@ func HandleQuery(cfg *config.Config, rateLimiter *rate.Limiter, log *logrus.Logg
 
 // ------------------- PRIVATE WORKER & SCAN LOGIC -------------------
 
-func worker(ctx context.Context, taskQueue chan ScanTask, cfg *config.Config,
-	semaphore chan struct{}, metricsCollector *metrics.MetricsCollector) {
-
-	for {
+// worker processes tasks from the taskQueue using a for-range loop.
+func worker(ctx context.Context, taskQueue chan ScanTask, cfg *config.Config, semaphore chan struct{}, metricsCollector *metrics.MetricsCollector, log *logrus.Logger) {
+	for task := range taskQueue {
 		select {
 		case <-ctx.Done():
 			return
-		case task := <-taskQueue:
-			semaphore <- struct{}{}
-			go func(task ScanTask) {
-				defer func() { <-semaphore }()
-
-				logrus.WithFields(logrus.Fields{
+		default:
+		}
+		semaphore <- struct{}{}
+		go func(task ScanTask) {
+			defer func() {
+				<-semaphore
+				// Recover from panics to avoid crashing the worker.
+				if r := recover(); r != nil {
+					log.WithField("task", task).Errorf("Recovered from panic: %v", r)
+				}
+			}()
+			log.WithFields(logrus.Fields{
+				"target":    task.Target,
+				"portRange": task.PortRange,
+			}).Debug("Worker picked up a task")
+			scanCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Scanning.Timeout)*time.Second)
+			defer cancel()
+			if err := scanTarget(scanCtx, task, cfg, metricsCollector, log); err != nil {
+				log.WithFields(logrus.Fields{
 					"target":    task.Target,
 					"portRange": task.PortRange,
-				}).Debug("Worker picked up a task")
-
-				scanCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Scanning.Timeout)*time.Second)
-				defer cancel()
-
-				if err := scanTarget(scanCtx, task, cfg, metricsCollector); err != nil {
-					logrus.WithFields(logrus.Fields{
-						"target":    task.Target,
-						"portRange": task.PortRange,
-						"error":     err,
-					}).Error("Scan failed")
-				}
-				metricsCollector.UpdateTaskQueueSize(len(taskQueue))
-			}(task)
-		}
+					"error":     err,
+				}).Error("Scan failed")
+			}
+			metricsCollector.UpdateTaskQueueSize(len(taskQueue))
+		}(task)
 	}
 }
 
-func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsCollector *metrics.MetricsCollector) error {
-	scanner, err := createNmapScanner(task, cfg, ctx)
+// scanTarget performs the scan for a given task.
+func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsCollector *metrics.MetricsCollector, log *logrus.Logger) error {
+	scannerInstance, err := createNmapScanner(task, cfg, ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create Nmap scanner: %w", err)
 	}
-
 	startTime := time.Now()
-	result, warnings, err := runNmapScan(ctx, scanner, task, metricsCollector)
+	result, warnings, err := runNmapScan(ctx, scannerInstance, task, log)
 	if err != nil {
 		return fmt.Errorf("failed to run Nmap scan: %w", err)
 	}
-
 	if warnings != nil {
-		logrus.Warn(warnings)
+		log.Warn(warnings)
 	}
-
 	duration := time.Since(startTime).Seconds()
-	newResults := processNmapResults(result, task)
-
+	newResults := processNmapResults(result, task, log)
 	updateMetrics(task, cfg, duration, newResults, metricsCollector)
 	return nil
 }
 
+// createNmapScanner builds an Nmap scanner with the specified options.
 func createNmapScanner(task ScanTask, cfg *config.Config, ctx context.Context) (*nmap.Scanner, error) {
 	scannerOptions := []func(*nmap.Scanner){
 		nmap.WithTargets(task.Target),
@@ -163,39 +155,44 @@ func createNmapScanner(task ScanTask, cfg *config.Config, ctx context.Context) (
 		nmap.WithMinParallelism(cfg.Scanning.MinParallelism),
 		nmap.WithSYNScan(),
 	}
-
 	if cfg.Scanning.DisableDNSResolution {
 		scannerOptions = append(scannerOptions, nmap.WithDisabledDNSResolution())
 	}
-
 	return nmap.NewScanner(scannerOptions...)
 }
 
-func runNmapScan(ctx context.Context, scanner *nmap.Scanner, task ScanTask, metricsCollector *metrics.MetricsCollector) (*nmap.Run, []string, error) {
-	resultChan := make(chan *nmap.Run, 1)
-	warningsChan := make(chan []string, 1)
-	errChan := make(chan error, 1)
+// scanResult is a consolidated type for the Nmap scan result.
+type scanResult struct {
+	result   *nmap.Run
+	warnings []string
+	err      error
+}
 
+// runNmapScan executes the Nmap scan and returns the results via a single channel.
+func runNmapScan(ctx context.Context, scanner *nmap.Scanner, task ScanTask, log *logrus.Logger) (*nmap.Run, []string, error) {
+	resultCh := make(chan scanResult, 1)
 	go func() {
 		result, warnings, err := scanner.Run()
-		resultChan <- result
-		warningsChan <- warnings
-		errChan <- err
+		resultCh <- scanResult{
+			result:   result,
+			warnings: warnings,
+			err:      err,
+		}
 	}()
-
 	select {
 	case <-ctx.Done():
-		metricsCollector.IncrementScanTimeout(task.Target, task.PortRange, task.Protocol)
+		log.WithField("target", task.Target).Warn("nmap scan timed out")
 		return nil, nil, fmt.Errorf("nmap scan timed out: %w", ctx.Err())
-	case err := <-errChan:
-		if err != nil {
-			return nil, nil, fmt.Errorf("unable to run Nmap scan: %w", err)
+	case res := <-resultCh:
+		if res.err != nil {
+			return nil, nil, fmt.Errorf("unable to run Nmap scan: %w", res.err)
 		}
-		return <-resultChan, <-warningsChan, nil
+		return res.result, res.warnings, nil
 	}
 }
 
-func processNmapResults(result *nmap.Run, task ScanTask) map[string]struct{} {
+// processNmapResults extracts open ports from the Nmap results.
+func processNmapResults(result *nmap.Run, task ScanTask, log *logrus.Logger) map[string]struct{} {
 	newResults := make(map[string]struct{})
 	for _, host := range result.Hosts {
 		if len(host.Ports) == 0 || len(host.Addresses) == 0 {
@@ -205,7 +202,7 @@ func processNmapResults(result *nmap.Run, task ScanTask) map[string]struct{} {
 			if port.State.State == "open" {
 				portKey := fmt.Sprintf("%s:%d", host.Addresses[0], port.ID)
 				newResults[portKey] = struct{}{}
-				logrus.WithFields(logrus.Fields{
+				log.WithFields(logrus.Fields{
 					"ip":       host.Addresses[0],
 					"port":     port.ID,
 					"protocol": task.Protocol,
@@ -216,8 +213,9 @@ func processNmapResults(result *nmap.Run, task ScanTask) map[string]struct{} {
 	return newResults
 }
 
+// updateMetrics updates the metrics collector with scan results.
 func updateMetrics(task ScanTask, cfg *config.Config, duration float64, newResults map[string]struct{}, metricsCollector *metrics.MetricsCollector) {
-	targetKey := task.Target + "_" + task.PortRange
+	targetKey := createTargetKey(task.Target, task.PortRange)
 	if cfg.Scanning.DurationMetrics {
 		metricsCollector.ObserveScanDuration(task.Target, task.PortRange, task.Protocol, duration)
 	}
@@ -226,7 +224,6 @@ func updateMetrics(task ScanTask, cfg *config.Config, duration float64, newResul
 
 // ------------------- PRIVATE HELPERS -------------------
 
-// splitIntoSubnets splits a large CIDR into smaller subnets based on maxCIDRSize.
 func splitIntoSubnets(target string, maxCIDRSize int) ([]string, error) {
 	if ip := net.ParseIP(target); ip != nil {
 		return []string{target}, nil
@@ -235,7 +232,6 @@ func splitIntoSubnets(target string, maxCIDRSize int) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid target: %s", target)
 	}
-
 	ones, bits := ipNet.Mask.Size()
 	switch bits {
 	case 32:
@@ -251,13 +247,11 @@ func splitIPv4Subnet(target string, ones, maxCIDRSize int) ([]string, error) {
 	if ones >= maxCIDRSize {
 		return []string{target}, nil
 	}
-
 	net4 := iplib.Net4FromStr(target)
 	subnets4, err := net4.Subnet(maxCIDRSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to split IPv4 subnet: %w", err)
 	}
-
 	result := make([]string, len(subnets4))
 	for i, subnet := range subnets4 {
 		result[i] = subnet.String()
@@ -272,13 +266,11 @@ func splitIPv6Subnet(target string, ones, maxCIDRSize int) ([]string, error) {
 	if maxCIDRSize > 128 || maxCIDRSize < ones {
 		return nil, fmt.Errorf("invalid mask length for IPv6 subnetting: %d", maxCIDRSize)
 	}
-
 	net6 := iplib.Net6FromStr(target)
 	subnets6, err := net6.Subnet(maxCIDRSize, 128)
 	if err != nil {
 		return nil, fmt.Errorf("failed to split IPv6 subnet: %w", err)
 	}
-
 	result := make([]string, len(subnets6))
 	for i, subnet := range subnets6 {
 		result[i] = subnet.String()
@@ -286,7 +278,6 @@ func splitIPv6Subnet(target string, ones, maxCIDRSize int) ([]string, error) {
 	return result, nil
 }
 
-// createTargetKey composes the target key used by metrics to ensure uniqueness.
 func createTargetKey(ipRange, portRange string) string {
 	return ipRange + "_" + portRange
 }
@@ -310,7 +301,6 @@ func parseQueryParams(r *http.Request) (string, string, string, error) {
 	ipRange := r.URL.Query().Get("ip")
 	portRange := r.URL.Query().Get("ports")
 	protocol := r.URL.Query().Get("protocol")
-
 	if ipRange == "" || portRange == "" {
 		return "", "", "", fmt.Errorf("missing required parameters 'ip' and 'ports'")
 	}
