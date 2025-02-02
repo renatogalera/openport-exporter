@@ -1,16 +1,123 @@
----
+# Default values for openport-exporter
+
+# The container image to deploy
 image:
-  repository: 
-  tag: v0.1.0
+  repository: "renatogalera/openport-exporter"  # <-- Example valid repository
+  tag: "v0.1.0"
+  pullPolicy: "IfNotPresent"
 
+# Replica count for the Deployment
+replicaCount: 1
+
+deployment:
+  annotations: {}
+  labels: {}
+
+# Pod disruption budget settings
+podDisruptionBudget:
+  annotations: {}
+  labels: {}
+  enabled: false
+  minAvailable: 1
+  maxUnavailable: ""
+
+# Kubernetes service account
+serviceAccount:
+  create: true
+  name: ""
+
+# Add environment variables that the container should use
+extraEnv: []
+  # - name: EXAMPLE_ENV
+  #   value: "someValue"
+
+# Resource requests and limits
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "250m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+# Node scheduling
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# SecurityContext at the Pod level
+podSecurityContext: {}
+  # Example:
+  # runAsUser: 1000
+  # fsGroup: 2000
+
+# Container SecurityContext
+containerSecurityContext: {}
+  # Example:
+  # privileged: true
+  # capabilities:
+  #   add:
+  #     - NET_ADMIN
+  #     - NET_RAW
+
+# Readiness and Liveness probes configuration
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Ingress configuration
 ingress:
-  host: 
-  className: nginx
+  enabled: false
+  className: "nginx"
+  host: "openport.example.com"
+  annotations: {}
+  tls: []
+  # Example:
+  # tls:
+  #   - hosts:
+  #     - "openport.example.com"
+  #     secretName: "openport-tls-cert"
 
+# Service configuration
+service:
+  type: ClusterIP
+  port: 9919
+  annotations: {}
+
+# Prometheus ServiceMonitor configuration
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+  namespace: ""
+
+# Basic Auth
+basicAuth:
+  enabled: false
+  username: "admin"
+  password: "secret"
+
+# Additional labels and annotations for the ConfigMap (optional)
+configMap:
+  labels: {}
+  annotations: {}
+
+# Config file data mapped to config.yaml
 config:
   server:
     port: 9919
-  
   scanning:
     interval: 86400
     port_range: "1-65535"
@@ -20,17 +127,10 @@ config:
     disable_dns_resolution: true
     min_rate: 1000
     min_parallelism: 1000
-  
   performance:
     rate_limit: 30
     task_queue_size: 1000
     worker_count: 2
-  
-  # auth:
-  #   basic:
-  #     username: admin
-  #     password: secret
-  
   # targets:
   #   - 179.190.33.0/24
   #   - 177.154.60.0/23

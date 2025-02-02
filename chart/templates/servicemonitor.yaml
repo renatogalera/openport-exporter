@@ -1,14 +1,29 @@
-#apiVersion: monitoring.coreos.com/v1
-#kind: ServiceMonitor
-#metadata:
-#  name: openport-exporter
-#  labels:
-#    release: kube-prometheus
-#spec:
-#  selector:
-#    matchLabels:
-#      app: openport-exporter
-#  endpoints:
-#  - port: "9919"
-#    interval: 30s
-#    path: /metrics
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "openport-exporter.fullname" . }}
+{{- if .Values.serviceMonitor.labels }}
+  labels:
+    {{- toYaml .Values.serviceMonitor.labels | nindent 4 }}
+{{- end }}
+{{- if .Values.serviceMonitor.annotations }}
+  annotations:
+    {{- toYaml .Values.serviceMonitor.annotations | nindent 4 }}
+{{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "openport-exporter.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      path: /metrics
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+{{- if .Values.serviceMonitor.namespace }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.serviceMonitor.namespace }}
+{{- end }}
+{{- end }}

@@ -1,43 +1,98 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: openport-exporter
-  labels:
-    app: openport-exporter
+  name: {{ include "openport-exporter.fullname" . }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: openport-exporter
+      app.kubernetes.io/name: {{ include "openport-exporter.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  strategy:
+    type: RollingUpdate
   template:
     metadata:
+    {{- if .Values.configMap.labels }}
       labels:
-        app: openport-exporter
+    {{- toYaml .Values.deployment.labels | nindent 10 }}
+    {{- end }}
+    {{- if .Values.deployment.annotations }}
+      annotations:
+    {{- toYaml .Values.deployment.annotations | nindent 10 }}
+    {{- end }}
     spec:
+      serviceAccountName: {{ include "openport-exporter.serviceAccountName" . }}
+      {{- if .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- end }}
+      {{- if .Values.containerSecurityContext.enabled }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .Values.tolerations }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- end }}
       containers:
       - name: openport-exporter
-        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 9919
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- if .Values.containerSecurityContext.enabled }}
         securityContext:
-          privileged: true 
-          capabilities:
-            add:
-              - NET_ADMIN 
-              - NET_RAW
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "500m"
-          limits:
-            memory: "1024Mi"
-            cpu: "3000m"
+          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
+        {{- end }}
+        ports:
+          - containerPort: {{ .Values.config.server.port }}
+            name: metrics
+        env:
+          {{- range .Values.extraEnv }}
+          - name: {{ .name }}
+            value: "{{ .value }}"
+          {{- end }}
+          {{- if .Values.basicAuth.enabled }}
+          - name: BASIC_AUTH_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "openport-exporter.fullname" . }}-basic-auth
+                key: username
+          - name: BASIC_AUTH_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "openport-exporter.fullname" . }}-basic-auth
+                key: password
+          {{- end }}
         volumeMounts:
-        - name: config-volume
-          mountPath: /app/config.yaml
-          subPath: config.yaml
+          - name: config-volume
+            mountPath: /app/config.yaml
+            subPath: config.yaml
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        {{- if .Values.readinessProbe.enabled }}
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+        {{- end }}
+        {{- if .Values.livenessProbe.enabled }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: metrics
+          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+          timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+          failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+        {{- end }}
       volumes:
-      - name: config-volume
-        configMap:
-          name: openport-exporter-config
+        - name: config-volume
+          configMap:
+            name: {{ include "openport-exporter.fullname" . }}-config
