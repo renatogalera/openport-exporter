@@ -1,0 +1,14 @@
+#apiVersion: monitoring.coreos.com/v1
+#kind: ServiceMonitor
+#metadata:
+#  name: openport-exporter
+#  labels:
+#    release: kube-prometheus
+#spec:
+#  selector:
+#    matchLabels:
+#      app: openport-exporter
+#  endpoints:
+#  - port: "9919"
+#    interval: 30s
+#    path: /metrics

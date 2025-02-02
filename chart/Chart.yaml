@@ -1,0 +1,26 @@
+apiVersion: v2
+name: openport-exporter
+description: A Helm chart for deploying OpenPort Exporter
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+maintainers:
+  - name: Renato Guilhermini
+    email: rennato@gmail.com
+
+sources:
+  - https://github.com/renatogalera/openport-exporter
+keywords:
+  - monitoring
+  - exporter
+  - prometheus
+  - openport
+
+home: https://github.com/renatogalera/openport-exporter
+
+dependencies: []
+
+annotations:
+  category: "Monitoring"
+  license: "MIT"

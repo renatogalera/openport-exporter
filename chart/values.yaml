@@ -1,0 +1,37 @@
+---
+image:
+  repository: 
+  tag: v0.1.0
+
+ingress:
+  host: 
+  className: nginx
+
+config:
+  server:
+    port: 9919
+  
+  scanning:
+    interval: 86400
+    port_range: "1-65535"
+    max_cidr_size: 28
+    timeout: 10800
+    duration_metrics: true
+    disable_dns_resolution: true
+    min_rate: 1000
+    min_parallelism: 1000
+  
+  performance:
+    rate_limit: 30
+    task_queue_size: 1000
+    worker_count: 2
+  
+  # auth:
+  #   basic:
+  #     username: admin
+  #     password: secret
+  
+  # targets:
+  #   - 179.190.33.0/24
+  #   - 177.154.60.0/23
+  #   - 148.59.72.0/24

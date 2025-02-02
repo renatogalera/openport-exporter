@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openport-exporter
+  labels:
+    app: openport-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openport-exporter
+  template:
+    metadata:
+      labels:
+        app: openport-exporter
+    spec:
+      containers:
+      - name: openport-exporter
+        image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9919
+        securityContext:
+          privileged: true 
+          capabilities:
+            add:
+              - NET_ADMIN 
+              - NET_RAW
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "500m"
+          limits:
+            memory: "1024Mi"
+            cpu: "3000m"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config.yaml
+          subPath: config.yaml
+      volumes:
+      - name: config-volume
+        configMap:
+          name: openport-exporter-config

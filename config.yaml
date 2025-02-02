@@ -1,0 +1,20 @@
+# Server configuration
+server:
+  port: 9919
+
+# Scanning configuration  
+scanning:
+  interval: 86400
+  port_range: "1-65535"
+  max_cidr_size: 24
+  timeout: 3600
+  duration_metrics: false
+  disable_dns_resolution: true
+  min_rate: 1000
+  min_parallelism: 1000
+
+# Performance configuration
+performance:
+  rate_limit: 30
+  task_queue_size: 1000  
+  worker_count: 10
