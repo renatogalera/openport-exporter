@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"openport-exporter/config"
 	"openport-exporter/scanner"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -79,7 +81,7 @@ func TestStartWorkers(t *testing.T) {
 	app.TaskQueue <- scanner.ScanTask{Target: "192.168.1.1", PortRange: "80", Protocol: "tcp"}
 
 	// Wait a short time for workers to process
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	// Check if the task was processed (queue should be empty)
 	if len(app.TaskQueue) != 0 {
@@ -87,6 +89,7 @@ func TestStartWorkers(t *testing.T) {
 	}
 }
 
+// TestSetupHTTPHandlers tests the HTTP handler registration.
 func TestSetupHTTPHandlers(t *testing.T) {
 	configPath := createTempConfig(t)
 	defer os.Remove(configPath)
@@ -97,28 +100,29 @@ func TestSetupHTTPHandlers(t *testing.T) {
 		t.Fatalf("Failed to create new app: %v", err)
 	}
 
+	// Registra as rotas no mux personalizado (app.Mux)
 	app.SetupHTTPHandlers()
 
-	// Test /query endpoint
+	// Testa o endpoint /query
 	req, err := http.NewRequest("GET", "/query", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rr := httptest.NewRecorder()
-	http.DefaultServeMux.ServeHTTP(rr, req)
-
+	// Usa o app.Mux ao invés de http.DefaultServeMux
+	app.Mux.ServeHTTP(rr, req)
 	if status := rr.Code; status != http.StatusBadRequest {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusBadRequest)
 	}
 
-	// Test /metrics endpoint
+	// Testa o endpoint /metrics
 	req, err = http.NewRequest("GET", "/metrics", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rr = httptest.NewRecorder()
-	http.DefaultServeMux.ServeHTTP(rr, req)
-
+	// Usa o app.Mux ao invés de http.DefaultServeMux
+	app.Mux.ServeHTTP(rr, req)
 	if status := rr.Code; status != http.StatusOK {
 		t.Errorf("handler returned wrong status code: got %v want %v", status, http.StatusOK)
 	}
@@ -134,40 +138,51 @@ func TestStartServer(t *testing.T) {
 		t.Fatalf("Failed to create new app: %v", err)
 	}
 
-	// Start the server in a goroutine
+	// Configura as rotas para que /metrics esteja disponível
+	app.SetupHTTPHandlers()
+
+	// Inicia o servidor em uma goroutine separada
 	go func() {
 		if err := app.StartServer(); err != nil {
 			t.Errorf("StartServer returned an error: %v", err)
 		}
 	}()
 
-	// Give the server a moment to start
-	time.Sleep(100 * time.Millisecond)
+	// Dá um tempo para o servidor iniciar
+	time.Sleep(200 * time.Millisecond)
 
-	// Try to connect to the server
-	resp, err := http.Get("http://localhost:8080/metrics")
+	// Recupera a porta escolhida pelo sistema (ephemeral port)
+	if app.serverListener == nil {
+		t.Fatal("serverListener is nil; server probably failed to start")
+	}
+	actualPort := app.serverListener.Addr().(*net.TCPAddr).Port
+
+	// Constrói a URL usando strconv.Itoa para converter a porta corretamente
+	url := "http://localhost:" + strconv.Itoa(actualPort) + "/metrics"
+	resp, err := http.Get(url)
 	if err != nil {
 		t.Errorf("Failed to connect to server: %v", err)
 	} else {
-		defer resp.Body.Close()
+		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("Unexpected status code: got %v want %v", resp.StatusCode, http.StatusOK)
 		}
 	}
 }
 
+// createTempConfig writes a minimal YAML config with ephemeral port (0).
 func createTempConfig(t *testing.T) string {
 	content := `
-    server:
-      port: 8080
-    scanning:
-      interval: 3600
-      port_range: "1-1000"
-    performance:
-      rate_limit: 30
-      task_queue_size: 50
-      worker_count: 3
-    `
+server:
+  port: 0  # Use ephemeral port for testing
+scanning:
+  interval: 3600
+  port_range: "1-1000"
+performance:
+  rate_limit: 30
+  task_queue_size: 50
+  worker_count: 3
+`
 	tmpfile, err := os.CreateTemp("", "config_*.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -182,13 +197,13 @@ func createTempConfig(t *testing.T) string {
 
 	return tmpfile.Name()
 }
+
+// TestMain resets the default Prometheus registry before/after the test suite.
 func TestMain(m *testing.M) {
-	// Setup
+	// Setup: override the default registry
 	prometheus.DefaultRegisterer = prometheus.NewRegistry()
-
-	// Run tests
-	m.Run()
-
+	code := m.Run()
 	// Teardown
 	prometheus.DefaultRegisterer = prometheus.NewRegistry()
+	os.Exit(code)
 }
