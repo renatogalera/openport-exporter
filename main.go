@@ -2,7 +2,8 @@ package main
 
 import (
 	"log"
-	"openport-exporter/app"
+
+	"github.com/renatogalera/openport-exporter/app"
 )
 
 func main() {

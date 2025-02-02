@@ -5,12 +5,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"openport-exporter/config"
-	"openport-exporter/scanner"
 	"os"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/renatogalera/openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/scanner"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"

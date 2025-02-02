@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/config"
 )
 
 func TestBasicAuth(t *testing.T) {
