@@ -9,7 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// HealthCheckHandler returns a handler that returns a 200 OK response if the task queue is not full
+// HealthCheckHandler returns a handler that returns a 200 OK response if the task queue is not full.
 func HealthCheckHandler(taskQueue chan scanner.ScanTask, cfg *config.Config, log *logrus.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queueSize := len(taskQueue)
@@ -21,6 +21,6 @@ func HealthCheckHandler(taskQueue chan scanner.ScanTask, cfg *config.Config, log
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status": "ok", "queue_size": ` + fmt.Sprintf("%d", queueSize) + `}`))
+		_, _ = w.Write([]byte(`{"status": "ok", "queue_size": ` + fmt.Sprintf("%d", queueSize) + `}`))
 	}
 }
