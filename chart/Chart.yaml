@@ -1,21 +1,24 @@
 apiVersion: v2
 name: openport-exporter
-description: A Helm chart for deploying OpenPort Exporter
+description: A Helm chart for deploying OpenPort Exporter with extended Kubernetes features
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
 
 maintainers:
-  - name: Renato Guilhermini
-    email: rennato@gmail.com
+  - name: "Renato Guilhermini"
+    email: "rennato@gmail.com"
 
 sources:
   - https://github.com/renatogalera/openport-exporter
+
 keywords:
   - monitoring
   - exporter
   - prometheus
   - openport
+  - security
+  - networking
 
 home: https://github.com/renatogalera/openport-exporter
 
