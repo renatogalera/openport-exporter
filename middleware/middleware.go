@@ -4,7 +4,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 
-	"openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/config"
 )
 
 // BasicAuth creates a middleware for HTTP Basic Authentication.
