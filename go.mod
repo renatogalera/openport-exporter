@@ -5,8 +5,10 @@ go 1.23.0
 require (
 	github.com/Ullaakut/nmap v2.0.2+incompatible
 	github.com/c-robinson/iplib v1.0.8
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/prometheus/client_golang v1.20.2
 	github.com/sirupsen/logrus v1.9.3
+	github.com/sony/gobreaker v1.0.0
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/time v0.5.0
 	gopkg.in/yaml.v2 v2.4.0
