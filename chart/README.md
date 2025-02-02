@@ -1,4 +1,4 @@
-# README - OpenPort Exporter Helm Chart
+# OpenPort Exporter Helm Chart
 
 This repository contains the **OpenPort Exporter Helm Chart**, which packages and simplifies the deployment of the [OpenPort Exporter](https://github.com/renatogalera/openport-exporter) in a Kubernetes cluster.  
 It provides functionality for monitoring and collecting metrics about open ports, helping detect potential security vulnerabilities or unexpected network behavior.
