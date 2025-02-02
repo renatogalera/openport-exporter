@@ -60,7 +60,7 @@ func NewMetricsCollector() *MetricsCollector {
 	return mc
 }
 
-// Implement the prometheus.Collector interface.
+// Describe sends the super-set of all descriptors of metrics to the provided channel.
 func (mc *MetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	mc.openPorts.Describe(ch)
 	mc.openPortsTotal.Describe(ch)
@@ -69,6 +69,7 @@ func (mc *MetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	mc.scanTimeouts.Describe(ch)
 }
 
+// Collect is called by the Prometheus registry when collecting metrics.
 func (mc *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	mc.openPorts.Collect(ch)
 	mc.openPortsTotal.Collect(ch)
@@ -94,7 +95,41 @@ func (mc *MetricsCollector) UpdateMetrics(targetKey string, newResults map[strin
 	mc.storeCurrentScanInfo(targetKey, newResults)
 }
 
-// getPreviousScanInfo retrieves the previous scan information for a target.
+// CanScan checks if a new scan can be performed based on the scan interval.
+func (mc *MetricsCollector) CanScan(targetKey string, scanInterval time.Duration) bool {
+	infoInterface, exists := mc.scannedTargets.Load(targetKey)
+	if !exists {
+		return true
+	}
+	info := infoInterface.(*ScanInfo)
+	return time.Since(info.LastScan) >= scanInterval
+}
+
+// RegisterScan registers a new scan with the current time.
+func (mc *MetricsCollector) RegisterScan(targetKey string) {
+	mc.scannedTargets.Store(targetKey, &ScanInfo{
+		Ports:    make(map[string]struct{}),
+		LastScan: time.Now(),
+	})
+}
+
+// IncrementScanTimeout increments the scan timeout counter.
+func (mc *MetricsCollector) IncrementScanTimeout(target, portRange, protocol string) {
+	mc.scanTimeouts.WithLabelValues(target, portRange, protocol).Inc()
+}
+
+// ObserveScanDuration sets the duration metric of a scan.
+func (mc *MetricsCollector) ObserveScanDuration(target, portRange, protocol string, duration float64) {
+	mc.scanDuration.WithLabelValues(target, portRange, protocol).Set(duration)
+}
+
+// UpdateTaskQueueSize updates the task queue size metric.
+func (mc *MetricsCollector) UpdateTaskQueueSize(queueSize int) {
+	mc.taskQueueSizeMetric.Set(float64(queueSize))
+}
+
+// ------------------- PRIVATE METHODS -------------------
+
 func (mc *MetricsCollector) getPreviousScanInfo(targetKey string) *ScanInfo {
 	prevScanInfoInterface, _ := mc.scannedTargets.Load(targetKey)
 	if prevScanInfoInterface == nil {
@@ -103,7 +138,6 @@ func (mc *MetricsCollector) getPreviousScanInfo(targetKey string) *ScanInfo {
 	return prevScanInfoInterface.(*ScanInfo)
 }
 
-// updateNewOpenPorts updates metrics for new open ports.
 func (mc *MetricsCollector) updateNewOpenPorts(newResults map[string]struct{}) {
 	for portKey := range newResults {
 		parts := strings.Split(portKey, ":")
@@ -115,7 +149,6 @@ func (mc *MetricsCollector) updateNewOpenPorts(newResults map[string]struct{}) {
 	}
 }
 
-// updateClosedPorts updates metrics for ports that are now closed.
 func (mc *MetricsCollector) updateClosedPorts(prevPorts, newResults map[string]struct{}) {
 	for portKey := range prevPorts {
 		if _, stillOpen := newResults[portKey]; !stillOpen {
@@ -129,7 +162,6 @@ func (mc *MetricsCollector) updateClosedPorts(prevPorts, newResults map[string]s
 	}
 }
 
-// updateOpenPortsTotal updates the total number of open ports per IP.
 func (mc *MetricsCollector) updateOpenPortsTotal(prevPorts, newPorts map[string]struct{}) {
 	ipPortCount := make(map[string]int)
 
@@ -156,7 +188,6 @@ func (mc *MetricsCollector) updateOpenPortsTotal(prevPorts, newPorts map[string]
 	}
 }
 
-// extractIPsFromPorts extracts a set of IPs from a map of port keys.
 func extractIPsFromPorts(ports map[string]struct{}) map[string]struct{} {
 	ips := make(map[string]struct{})
 	for portKey := range ports {
@@ -169,43 +200,9 @@ func extractIPsFromPorts(ports map[string]struct{}) map[string]struct{} {
 	return ips
 }
 
-// storeCurrentScanInfo stores the current scan information.
 func (mc *MetricsCollector) storeCurrentScanInfo(targetKey string, newResults map[string]struct{}) {
 	mc.scannedTargets.Store(targetKey, &ScanInfo{
 		Ports:    newResults,
 		LastScan: time.Now(),
 	})
-}
-
-// CanScan checks if a new scan can be performed based on the scan interval.
-func (mc *MetricsCollector) CanScan(targetKey string, scanInterval time.Duration) bool {
-	infoInterface, exists := mc.scannedTargets.Load(targetKey)
-	if !exists {
-		return true
-	}
-	info := infoInterface.(*ScanInfo)
-	return time.Since(info.LastScan) >= scanInterval
-}
-
-// RegisterScan registers a new scan.
-func (mc *MetricsCollector) RegisterScan(targetKey string) {
-	mc.scannedTargets.Store(targetKey, &ScanInfo{
-		Ports:    make(map[string]struct{}),
-		LastScan: time.Now(),
-	})
-}
-
-// IncrementScanTimeout increments the scan timeout counter.
-func (mc *MetricsCollector) IncrementScanTimeout(target, portRange, protocol string) {
-	mc.scanTimeouts.WithLabelValues(target, portRange, protocol).Inc()
-}
-
-// ObserveScanDuration observes the duration of a scan.
-func (mc *MetricsCollector) ObserveScanDuration(target, portRange, protocol string, duration float64) {
-	mc.scanDuration.WithLabelValues(target, portRange, protocol).Set(duration)
-}
-
-// UpdateTaskQueueSize updates the task queue size metric.
-func (mc *MetricsCollector) UpdateTaskQueueSize(queueSize int) {
-	mc.taskQueueSizeMetric.Set(float64(queueSize))
 }

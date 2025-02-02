@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"time"
 
@@ -51,6 +52,7 @@ type BasicAuthConfig struct {
 	Password string `yaml:"password"`
 }
 
+// Default constants for fallback values.
 const (
 	DefaultScanInterval  = 10800
 	DefaultScanTimeout   = 3600
@@ -68,36 +70,38 @@ func LoadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 
-	var config Config
-	err = yaml.UnmarshalStrict(content, &config)
-	if err != nil {
+	var cfg Config
+	if err := yaml.UnmarshalStrict(content, &cfg); err != nil {
 		return nil, err
 	}
 
-	// Set defaults if necessary.
-	if config.Scanning.Interval <= 600 {
-		config.Scanning.Interval = DefaultScanInterval
+	// Validate or set defaults
+	if cfg.Server.Port <= 0 {
+		return nil, fmt.Errorf("invalid server port: %d", cfg.Server.Port)
 	}
-	if config.Scanning.Timeout <= 0 {
-		config.Scanning.Timeout = DefaultScanTimeout
+	if cfg.Scanning.Interval < 600 {
+		cfg.Scanning.Interval = DefaultScanInterval
 	}
-	if config.Scanning.PortRange == "" {
-		config.Scanning.PortRange = DefaultPortRange
+	if cfg.Scanning.Timeout <= 0 {
+		cfg.Scanning.Timeout = DefaultScanTimeout
 	}
-	if config.Performance.RateLimit <= 0 {
-		config.Performance.RateLimit = DefaultRateLimit
+	if cfg.Scanning.PortRange == "" {
+		cfg.Scanning.PortRange = DefaultPortRange
 	}
-	if config.Performance.WorkerCount <= 0 {
-		config.Performance.WorkerCount = DefaultWorkerCount
+	if cfg.Performance.RateLimit <= 0 {
+		cfg.Performance.RateLimit = DefaultRateLimit
 	}
-	if config.Performance.TaskQueueSize <= 0 {
-		config.Performance.TaskQueueSize = DefaultTaskQueueSize
+	if cfg.Performance.WorkerCount <= 0 {
+		cfg.Performance.WorkerCount = DefaultWorkerCount
 	}
-	if config.Scanning.MaxCIDRSize <= 0 {
-		config.Scanning.MaxCIDRSize = DefaultMaxCIDRSize
+	if cfg.Performance.TaskQueueSize <= 0 {
+		cfg.Performance.TaskQueueSize = DefaultTaskQueueSize
+	}
+	if cfg.Scanning.MaxCIDRSize <= 0 || cfg.Scanning.MaxCIDRSize > 128 {
+		cfg.Scanning.MaxCIDRSize = DefaultMaxCIDRSize
 	}
 
-	return &config, nil
+	return &cfg, nil
 }
 
 // GetScanIntervalDuration returns the scan interval as a time.Duration.
