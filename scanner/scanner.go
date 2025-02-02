@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"openport-exporter/config"
-	"openport-exporter/metrics"
+	"github.com/renatogalera/openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/metrics"
 
 	"github.com/Ullaakut/nmap"
 	"github.com/c-robinson/iplib"

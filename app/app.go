@@ -10,10 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"openport-exporter/config"
-	"openport-exporter/healthcheck"
-	"openport-exporter/metrics"
-	"openport-exporter/scanner"
+	"github.com/renatogalera/openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/healthcheck"
+	"github.com/renatogalera/openport-exporter/metrics"
+	"github.com/renatogalera/openport-exporter/scanner"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"

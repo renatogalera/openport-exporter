@@ -4,10 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"openport-exporter/config"
-	"openport-exporter/metrics"
 	"reflect"
 	"testing"
+
+	"github.com/renatogalera/openport-exporter/config"
+	"github.com/renatogalera/openport-exporter/metrics"
 
 	"github.com/Ullaakut/nmap"
 	"github.com/sirupsen/logrus"
