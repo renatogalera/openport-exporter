@@ -1,19 +1,31 @@
+{{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: openport-exporter
+  name: {{ include "openport-exporter.fullname" . }}
+{{- if .Values.ingress.labels }}
+  labels:
+{{- toYaml "openport-exporter.labels" . | nindent 4 }}
+{{- end }}
+{{- if .Values.ingress.annotations }}
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+{{- toYaml .Values.ingress.annotations | nindent 4 }}
+{{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   rules:
-  - host: {{ .Values.ingress.host }}
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: openport-exporter
-            port:
-              number: 9919
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "openport-exporter.fullname" . }}
+                port:
+                  number: {{ .Values.config.server.port }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+  {{- end }}
+{{- end }}
