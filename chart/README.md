@@ -182,6 +182,7 @@ The chart will create a Kubernetes Secret to store the credentials and inject th
 This project is licensed under the [MIT](./LICENSE) license.
 
 ---
+
 ## References
 
 - [OpenPort Exporter - Official Repository](https://github.com/renatogalera/openport-exporter)  

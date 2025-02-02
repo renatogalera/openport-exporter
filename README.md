@@ -1,5 +1,7 @@
 # OpenPort Exporter Documentation
 
+OpenPort Exporter is an nmap-based tool that scans a list of IP addresses and ports and exposes the results as Prometheus metrics.
+
 ## Configuration Options
 
 The table below outlines all configurable options available in `config.yaml` for OpenPort Exporter.
@@ -33,6 +35,7 @@ The following HTTP endpoints are available for managing scans and retrieving met
 | `/healthz` | `GET`  | Provides health information about the service and queue size.               |
 
 ---
+
 ## Metrics
 
 | Metric Name                | Description                                                                                              | Example                                                                                                   | Type    |
@@ -93,9 +96,7 @@ The `open_ports_total` metric provides the total count of open ports detected on
 
 If an IP address `192.168.1.100` has 5 open ports detected in the latest scan, the metric would be reported as:
 
-
 open_ports_total{ip="192.168.1.100"} 5
-
 
 #### **Important Notes**
 
@@ -116,14 +117,10 @@ By using both `open_port_status` and `open_ports_total`, you can achieve a compr
 
 Suppose you notice that `open_ports_total{ip="192.168.1.100"}` has increased from `5` to `10` in the last scan. You can then investigate further by examining the `open_port_status` metrics to identify which new ports have opened:
 
-
 open_port_status{ip="192.168.1.100", port="22", protocol="tcp"} 1
 open_port_status{ip="192.168.1.100", port="80", protocol="tcp"} 1
 open_port_status{ip="192.168.1.100", port="443", protocol="tcp"} 1
 ...
-
-
----
 
 ### Monitoring and Alerting Recommendations
 
@@ -136,28 +133,20 @@ open_port_status{ip="192.168.1.100", port="443", protocol="tcp"} 1
 ### Prometheus Query Examples
 
 - **Total Open Ports Across All IPs**:
-
   
   sum(open_ports_total)
-  
 
 - **List IPs with More Than 10 Open Ports**:
 
-  
   open_ports_total > 10
   
-
 - **Detect Sudden Increase in Open Ports (over the last hour)**:
 
-  
   increase(open_ports_total[1h]) > 5
-  
 
 - **Find Specific Open Ports on an IP**:
-
   
   open_port_status{ip="192.168.1.100"} == 1
-  
 
 ---
 
