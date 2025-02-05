@@ -1,4 +1,5 @@
 # OpenPort Exporter Documentation
+<meta name="google-site-verification" content="rrrI2uW37GCMl4Zpv9o8m708e97_x6UjzqT8SUE5XKU" />
 
 OpenPort Exporter is an nmap-based tool that scans a list of IP addresses and ports and exposes the results as Prometheus metrics.
 
