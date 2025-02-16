@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/renatogalera/openport-exporter/config"
@@ -130,19 +131,18 @@ func worker(ctx context.Context, taskQueue chan ScanTask, cfg *config.Config, se
 func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsCollector *metrics.MetricsCollector, log *logrus.Logger) error {
 	scannerInstance, err := createNmapScanner(task, cfg, ctx)
 	if err != nil {
-		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol)
+		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol, "scanner_creation")
 		return fmt.Errorf("failed to create Nmap scanner: %w", err)
 	}
 
 	startTime := time.Now()
 	result, warnings, err := runNmapScan(ctx, scannerInstance, task, log)
 	if err != nil {
-		// Mark the scan as failed
-		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol)
+		errorType := categorizeError(err)
+		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol, errorType)
 		return fmt.Errorf("failed to run Nmap scan: %w", err)
 	}
 
-	// If we got here, the scan ran (even if it found no open ports).
 	metricsCollector.IncrementScanSuccess(task.Target, task.PortRange, task.Protocol)
 	metricsCollector.SetLastScanTimestamp(task.Target, task.PortRange, task.Protocol, time.Now())
 
@@ -150,11 +150,11 @@ func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsC
 		log.Warn(warnings)
 	}
 	duration := time.Since(startTime).Seconds()
-	newResults, hostsUp, hostsDown := processNmapResults(result, task, log)
-
 	if cfg.Scanning.DurationMetrics {
 		metricsCollector.ObserveScanDuration(task.Target, task.PortRange, task.Protocol, duration)
+		metricsCollector.GetScanDurationHistogram().WithLabelValues(task.Target, task.PortRange, task.Protocol).Observe(duration)
 	}
+	newResults, hostsUp, hostsDown := processNmapResults(result, task, log)
 	metricsCollector.UpdateMetrics(createTargetKey(task.Target, task.PortRange), newResults)
 	metricsCollector.UpdateHostCounts(task.Target, hostsUp, hostsDown)
 
@@ -173,6 +173,10 @@ func createNmapScanner(task ScanTask, cfg *config.Config, ctx context.Context) (
 	}
 	if cfg.Scanning.DisableDNSResolution {
 		scannerOptions = append(scannerOptions, nmap.WithDisabledDNSResolution())
+	}
+	// Support for UDP scan if configured.
+	if cfg.Scanning.UDPScan {
+		scannerOptions = append(scannerOptions, nmap.WithUDPScan())
 	}
 	return nmap.NewScanner(scannerOptions...)
 }
@@ -215,14 +219,11 @@ func processNmapResults(result *nmap.Run, task ScanTask, log *logrus.Logger) (ma
 	hostsDown := 0
 
 	for _, host := range result.Hosts {
-		// Mark host up or down based on Nmap status.
 		if host.Status.State == "up" {
 			hostsUp++
 		} else {
 			hostsDown++
 		}
-
-		// Check ports
 		if len(host.Ports) > 0 && len(host.Addresses) > 0 {
 			for _, port := range host.Ports {
 				if port.State.State == "open" {
@@ -361,4 +362,17 @@ func jsonResponse(w http.ResponseWriter, response Response, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// categorizeError returns a simple error type label based on the error message.
+func categorizeError(err error) string {
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "timeout") {
+			return "timeout"
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "permission") {
+			return "permission"
+		}
+	}
+	return "other"
 }

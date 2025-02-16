@@ -32,6 +32,7 @@ type ScanningConfig struct {
 	DisableDNSResolution bool   `yaml:"disable_dns_resolution"`
 	MinRate              int    `yaml:"min_rate"`
 	MinParallelism       int    `yaml:"min_parallelism"`
+	UDPScan              bool   `yaml:"udp_scan"`
 }
 
 // PerformanceConfig holds performance-related configurations.
@@ -73,7 +74,7 @@ func LoadConfig(filename string) (*Config, error) {
 	if err := yaml.UnmarshalStrict(content, &cfg); err != nil {
 		return nil, err
 	}
-	// Allow 0 for ephemeral; reject negative or anything > 65535.
+	// Validate server port.
 	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
 		return nil, fmt.Errorf("invalid server port: %d", cfg.Server.Port)
 	}
