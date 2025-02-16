@@ -29,9 +29,9 @@ func TestUpdateMetrics(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(mc.openPorts.WithLabelValues(ip, port80, "tcp")))
 	assert.Equal(t, float64(1), testutil.ToFloat64(mc.openPorts.WithLabelValues(ip, port443, "tcp")))
 
-	// Update with closed ports
+	// Update with closed ports (443 removed)
 	newResults = map[string]struct{}{
-		"192.168.1.1:80": {}, // Port 443 is now closed
+		"192.168.1.1:80": {},
 	}
 	mc.UpdateMetrics(targetKey, newResults)
 
@@ -49,7 +49,7 @@ func TestCanScan(t *testing.T) {
 
 	// Check that a new scan cannot be performed immediately
 	canScan := mc.CanScan(targetKey, scanInterval)
-	assert.False(t, canScan, "A new scan should not be allowed immediately after registering a scan")
+	assert.False(t, canScan, "A new scan should not be allowed right after registering a scan")
 
 	// Simulate time passing to allow a new scan by adjusting LastScan
 	if val, ok := mc.scannedTargets.Load(targetKey); ok {
@@ -59,7 +59,7 @@ func TestCanScan(t *testing.T) {
 		}
 	}
 
-	// Check that a new scan can be performed after the interval
+	// Check that a new scan can be performed after enough time
 	canScan = mc.CanScan(targetKey, scanInterval)
 	assert.True(t, canScan, "A new scan should be allowed after the scan interval")
 }

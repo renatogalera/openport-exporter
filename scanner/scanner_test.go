@@ -129,10 +129,19 @@ func TestProcessNmapResults(t *testing.T) {
 		"192.168.1.1:80": {},
 	}
 
-	// Updated call: pass a logger instance as third argument.
-	newResults := processNmapResults(result, task, logrus.New())
-	if !reflect.DeepEqual(newResults, expectedResults) {
-		t.Errorf("Expected %v, got %v", expectedResults, newResults)
+	// Now we capture all three returned values
+	gotResults, gotUp, gotDown := processNmapResults(result, task, logrus.New())
+
+	if !reflect.DeepEqual(gotResults, expectedResults) {
+		t.Errorf("Expected %v, got %v", expectedResults, gotResults)
+	}
+
+	// Expect 1 host up, 0 down
+	if gotUp != 1 {
+		t.Errorf("Expected 1 host up, got %d", gotUp)
+	}
+	if gotDown != 0 {
+		t.Errorf("Expected 0 hosts down, got %d", gotDown)
 	}
 }
 
@@ -160,24 +169,4 @@ func TestCreateNmapScanner(t *testing.T) {
 	if scanner == nil {
 		t.Error("Expected scanner to be non-nil")
 	}
-}
-
-func TestUpdateMetrics(t *testing.T) {
-	task := ScanTask{
-		Target:    "192.168.1.1",
-		PortRange: "80",
-		Protocol:  "tcp",
-	}
-	cfg := &config.Config{
-		Scanning: config.ScanningConfig{
-			DurationMetrics: true,
-		},
-	}
-	duration := 1.5
-	newResults := map[string]struct{}{
-		"192.168.1.1:80": {},
-	}
-	metricsCollector := metrics.NewMetricsCollector()
-
-	updateMetrics(task, cfg, duration, newResults, metricsCollector)
 }
