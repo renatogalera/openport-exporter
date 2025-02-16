@@ -17,7 +17,7 @@ import (
 // when everything is ok.
 func TestHealthCheckHandlerOK(t *testing.T) {
 	cfg := &config.Config{
-		Performance: config.PerformanceConfig{
+		Scanning: config.ScanningConfig{
 			TaskQueueSize: 10,
 		},
 	}
@@ -46,7 +46,7 @@ func TestHealthCheckHandlerOK(t *testing.T) {
 // when the task queue is empty
 func TestHealthCheckHandlerQueueFull(t *testing.T) {
 	cfg := &config.Config{
-		Performance: config.PerformanceConfig{
+		Scanning: config.ScanningConfig{
 			TaskQueueSize: 2,
 		},
 	}
@@ -71,7 +71,7 @@ func TestHealthCheckHandlerQueueFull(t *testing.T) {
 // when the task queue is partially full
 func TestHealthCheckHandlerPartiallyFull(t *testing.T) {
 	cfg := &config.Config{
-		Performance: config.PerformanceConfig{
+		Scanning: config.ScanningConfig{
 			TaskQueueSize: 3,
 		},
 	}

@@ -61,8 +61,8 @@ targets:
 	if config.Scanning.PortRange != "1-1000" {
 		t.Errorf("Expected Scanning.PortRange to be '1-1000', got %s", config.Scanning.PortRange)
 	}
-	if config.Performance.RateLimit != 30 {
-		t.Errorf("Expected Performance.RateLimit to be 30, got %d", config.Performance.RateLimit)
+	if config.Scanning.RateLimit != 30 {
+		t.Errorf("Expected Performance.RateLimit to be 30, got %d", config.Scanning.RateLimit)
 	}
 	if config.Auth.Basic.Username != "testuser" {
 		t.Errorf("Expected Auth.Basic.Username to be 'testuser', got %s", config.Auth.Basic.Username)
@@ -107,8 +107,8 @@ server:
 	if config.Scanning.PortRange != DefaultPortRange {
 		t.Errorf("Expected default Scanning.PortRange to be '%s', got '%s'", DefaultPortRange, config.Scanning.PortRange)
 	}
-	if config.Performance.RateLimit != DefaultRateLimit {
-		t.Errorf("Expected default Performance.RateLimit to be %d, got %d", DefaultRateLimit, config.Performance.RateLimit)
+	if config.Scanning.RateLimit != DefaultRateLimit {
+		t.Errorf("Expected default Performance.RateLimit to be %d, got %d", DefaultRateLimit, config.Scanning.RateLimit)
 	}
 }
 

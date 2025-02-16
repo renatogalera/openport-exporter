@@ -161,23 +161,63 @@ func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsC
 	return nil
 }
 
-// createNmapScanner builds an Nmap scanner with the specified options.
+// createNmapScanner builds an Nmap scanner with the specified options based on configuration.
 func createNmapScanner(task ScanTask, cfg *config.Config, ctx context.Context) (*nmap.Scanner, error) {
 	scannerOptions := []func(*nmap.Scanner){
 		nmap.WithTargets(task.Target),
 		nmap.WithPorts(task.PortRange),
 		nmap.WithContext(ctx),
-		nmap.WithMinRate(cfg.Scanning.MinRate),
-		nmap.WithMinParallelism(cfg.Scanning.MinParallelism),
 		nmap.WithSYNScan(),
 	}
-	if cfg.Scanning.DisableDNSResolution {
-		scannerOptions = append(scannerOptions, nmap.WithDisabledDNSResolution())
+
+	// Nmap Performance Tuning Options from Config
+	if cfg.Scanning.MinRate > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithMinRate(cfg.Scanning.MinRate)) // --min-rate
 	}
+	if cfg.Scanning.MaxRate > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithMaxRate(cfg.Scanning.MaxRate)) // --max-rate
+	}
+	if cfg.Scanning.MinParallelism > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithMinParallelism(cfg.Scanning.MinParallelism)) // --min-parallelism
+	}
+	if cfg.Scanning.MaxRetries > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithMaxRetries(cfg.Scanning.MaxRetries)) // --max-retries
+	}
+	if cfg.Scanning.HostTimeout > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithHostTimeout(time.Duration(cfg.Scanning.HostTimeout)*time.Second)) // --host-timeout
+	}
+	if cfg.Scanning.ScanDelay > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithScanDelay(time.Duration(cfg.Scanning.ScanDelay)*time.Millisecond)) // --scan-delay
+	}
+	if cfg.Scanning.MaxScanDelay > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithMaxScanDelay(time.Duration(cfg.Scanning.MaxScanDelay)*time.Millisecond)) // --max-scan-delay
+	}
+	if cfg.Scanning.DisableDNSResolution {
+		scannerOptions = append(scannerOptions, nmap.WithDisabledDNSResolution()) // -n (no DNS resolution)
+	}
+	customArgs := []string{}
+	if cfg.Scanning.InitialRttTimeout > 0 {
+		customArgs = append(customArgs, fmt.Sprintf("--initial-rtt-timeout=%dms", cfg.Scanning.InitialRttTimeout))
+	}
+	if cfg.Scanning.MaxRttTimeout > 0 {
+		customArgs = append(customArgs, fmt.Sprintf("--max-rtt-timeout=%dms", cfg.Scanning.MaxRttTimeout))
+	}
+	if cfg.Scanning.MinRttTimeout > 0 {
+		customArgs = append(customArgs, fmt.Sprintf("--min-rtt-timeout=%dms", cfg.Scanning.MinRttTimeout))
+	}
+	if cfg.Scanning.DisableHostDiscovery {
+		customArgs = append(customArgs, "-Pn")
+	}
+
+	if len(customArgs) > 0 {
+		scannerOptions = append(scannerOptions, nmap.WithCustomArguments(customArgs...))
+	}
+
 	// Support for UDP scan if configured.
 	if cfg.Scanning.UDPScan {
-		scannerOptions = append(scannerOptions, nmap.WithUDPScan())
+		scannerOptions = append(scannerOptions, nmap.WithUDPScan()) // -sU
 	}
+
 	return nmap.NewScanner(scannerOptions...)
 }
 

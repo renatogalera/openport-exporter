@@ -53,7 +53,7 @@ func NewApp(configPath string, reg prometheus.Registerer) (*App, error) {
 		Config:           cfg,
 		Log:              log,
 		MetricsCollector: metricsCollector,
-		TaskQueue:        make(chan scanner.ScanTask, cfg.Performance.TaskQueueSize),
+		TaskQueue:        make(chan scanner.ScanTask, cfg.Scanning.TaskQueueSize),
 		RateLimiter:      setupRateLimiter(cfg),
 		// Create a fresh mux
 		Mux: http.NewServeMux(),
@@ -71,7 +71,7 @@ func (a *App) Run() error {
 	defer signal.Stop(sigCh)
 
 	// Start workers (injecting our logger) and enqueue tasks.
-	go scanner.StartWorkers(ctx, a.Config.Performance.WorkerCount, a.TaskQueue, a.Config, a.MetricsCollector, a.Log)
+	go scanner.StartWorkers(ctx, a.Config.Scanning.WorkerCount, a.TaskQueue, a.Config, a.MetricsCollector, a.Log)
 	go a.enqueueScanTasks(ctx)
 
 	a.SetupHTTPHandlers()
@@ -127,14 +127,14 @@ func loadConfiguration(log *logrus.Logger, configPath string) (*config.Config, e
 	if err != nil {
 		return nil, err
 	}
-	log.WithField("task_queue_size", cfg.Performance.TaskQueueSize).Info("Task queue size")
+	log.WithField("task_queue_size", cfg.Scanning.TaskQueueSize).Info("Task queue size")
 	return cfg, nil
 }
 
 // setupRateLimiter creates a rate limiter based on config.
 func setupRateLimiter(cfg *config.Config) *rate.Limiter {
 	// If RateLimit = N, the user wants N requests per minute -> N/60 per second.
-	return rate.NewLimiter(rate.Limit(cfg.Performance.RateLimit)/60.0, cfg.Performance.RateLimit)
+	return rate.NewLimiter(rate.Limit(cfg.Scanning.RateLimit)/60.0, cfg.Scanning.RateLimit)
 }
 
 // enqueueScanTasks periodically queues scan tasks for each configured target.
@@ -216,7 +216,7 @@ func (a *App) StartServer() error {
 
 // StartWorkers is a wrapper that starts scan workers.
 func (a *App) StartWorkers(ctx context.Context) {
-	scanner.StartWorkers(ctx, a.Config.Performance.WorkerCount, a.TaskQueue, a.Config, a.MetricsCollector, a.Log)
+	scanner.StartWorkers(ctx, a.Config.Scanning.WorkerCount, a.TaskQueue, a.Config, a.MetricsCollector, a.Log)
 }
 
 // Start is a wrapper method to start the HTTP server.

@@ -10,11 +10,10 @@ import (
 
 // Config holds the configuration settings.
 type Config struct {
-	Server      ServerConfig      `yaml:"server"`
-	Scanning    ScanningConfig    `yaml:"scanning"`
-	Performance PerformanceConfig `yaml:"performance"`
-	Auth        *AuthConfig       `yaml:"auth"`
-	Targets     []string          `yaml:"targets"`
+	Server   ServerConfig   `yaml:"server"`
+	Scanning ScanningConfig `yaml:"scanning"`
+	Auth     *AuthConfig    `yaml:"auth"`
+	Targets  []string       `yaml:"targets"`
 }
 
 // ServerConfig holds server-related configurations.
@@ -30,19 +29,25 @@ type ScanningConfig struct {
 	Timeout              int    `yaml:"timeout"`
 	DurationMetrics      bool   `yaml:"duration_metrics"`
 	DisableDNSResolution bool   `yaml:"disable_dns_resolution"`
-	MinRate              int    `yaml:"min_rate"`
-	MinParallelism       int    `yaml:"min_parallelism"`
 	UDPScan              bool   `yaml:"udp_scan"`
+
+	// Nmap Performance Tuning Options
+	RateLimit            int  `yaml:"rate_limit"`
+	TaskQueueSize        int  `yaml:"task_queue_size"`
+	WorkerCount          int  `yaml:"worker_count"`
+	MinRate              int  `yaml:"min_rate"`               // Minimum packets per second to send
+	MaxRate              int  `yaml:"max_rate"`               // Maximum packets per second to send
+	MinParallelism       int  `yaml:"min_parallelism"`        // Minimum number of probes to send in parallel
+	MaxRetries           int  `yaml:"max_retries"`            // Max port scan probe retransmissions
+	HostTimeout          int  `yaml:"host_timeout"`           // Give up on target after this long in seconds
+	ScanDelay            int  `yaml:"scan_delay"`             // Delay between probes in milliseconds
+	MaxScanDelay         int  `yaml:"max_scan_delay"`         // Maximum delay to adjust to in milliseconds
+	InitialRttTimeout    int  `yaml:"initial_rtt_timeout"`    // Initial RTT timeout in milliseconds
+	MaxRttTimeout        int  `yaml:"max_rtt_timeout"`        // Maximum RTT timeout in milliseconds
+	MinRttTimeout        int  `yaml:"min_rtt_timeout"`        // Minimum RTT timeout in milliseconds
+	DisableHostDiscovery bool `yaml:"disable_host_discovery"` // Skip host discovery (equivalent to -Pn)
 }
 
-// PerformanceConfig holds performance-related configurations.
-type PerformanceConfig struct {
-	RateLimit     int `yaml:"rate_limit"`
-	TaskQueueSize int `yaml:"task_queue_size"`
-	WorkerCount   int `yaml:"worker_count"`
-}
-
-// AuthConfig holds authentication configurations.
 type AuthConfig struct {
 	Basic BasicAuthConfig `yaml:"basic"`
 }
@@ -62,6 +67,18 @@ const (
 	DefaultWorkerCount   = 5
 	DefaultTaskQueueSize = 100
 	DefaultMaxCIDRSize   = 24
+
+	// Default Nmap Performance Tuning Values
+	DefaultMinRate              = 1000
+	DefaultMinParallelism       = 1000
+	DefaultMaxRetries           = 6
+	DefaultHostTimeout          = 300 // 5 minutes
+	DefaultScanDelay            = 0
+	DefaultMaxScanDelay         = 0
+	DefaultInitialRttTimeout    = 0
+	DefaultMaxRttTimeout        = 0
+	DefaultMinRttTimeout        = 0
+	DefaultDisableHostDiscovery = true // Default to Pn for faster scanning in known environments
 )
 
 // LoadConfig loads the configuration from a YAML file.
@@ -87,18 +104,49 @@ func LoadConfig(filename string) (*Config, error) {
 	if cfg.Scanning.PortRange == "" {
 		cfg.Scanning.PortRange = DefaultPortRange
 	}
-	if cfg.Performance.RateLimit <= 0 {
-		cfg.Performance.RateLimit = DefaultRateLimit
+	if cfg.Scanning.RateLimit <= 0 {
+		cfg.Scanning.RateLimit = DefaultRateLimit
 	}
-	if cfg.Performance.WorkerCount <= 0 {
-		cfg.Performance.WorkerCount = DefaultWorkerCount
+	if cfg.Scanning.WorkerCount <= 0 {
+		cfg.Scanning.WorkerCount = DefaultWorkerCount
 	}
-	if cfg.Performance.TaskQueueSize <= 0 {
-		cfg.Performance.TaskQueueSize = DefaultTaskQueueSize
+	if cfg.Scanning.TaskQueueSize <= 0 {
+		cfg.Scanning.TaskQueueSize = DefaultTaskQueueSize
 	}
 	if cfg.Scanning.MaxCIDRSize <= 0 || cfg.Scanning.MaxCIDRSize > 128 {
 		cfg.Scanning.MaxCIDRSize = DefaultMaxCIDRSize
 	}
+
+	// Apply default values for Nmap performance options if not set.
+	if cfg.Scanning.MinRate <= 0 {
+		cfg.Scanning.MinRate = DefaultMinRate
+	}
+	if cfg.Scanning.MinParallelism <= 0 {
+		cfg.Scanning.MinParallelism = DefaultMinParallelism
+	}
+	if cfg.Scanning.MaxRetries < 0 {
+		cfg.Scanning.MaxRetries = DefaultMaxRetries
+	}
+	if cfg.Scanning.HostTimeout <= 0 {
+		cfg.Scanning.HostTimeout = DefaultHostTimeout
+	}
+	if cfg.Scanning.ScanDelay < 0 {
+		cfg.Scanning.ScanDelay = DefaultScanDelay
+	}
+	if cfg.Scanning.MaxScanDelay < 0 {
+		cfg.Scanning.MaxScanDelay = DefaultMaxScanDelay
+	}
+	if cfg.Scanning.InitialRttTimeout < 0 {
+		cfg.Scanning.InitialRttTimeout = DefaultInitialRttTimeout
+	}
+	if cfg.Scanning.MaxRttTimeout < 0 {
+		cfg.Scanning.MaxRttTimeout = DefaultMaxRttTimeout
+	}
+	if cfg.Scanning.MinRttTimeout < 0 {
+		cfg.Scanning.MinRttTimeout = DefaultMinRttTimeout
+	}
+	// Default for DisableHostDiscovery is already set in constant
+
 	return &cfg, nil
 }
 
