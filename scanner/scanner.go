@@ -90,7 +90,6 @@ func HandleQuery(cfg *config.Config, rateLimiter *rate.Limiter, log *logrus.Logg
 
 // ------------------- PRIVATE WORKER & SCAN LOGIC -------------------
 
-// worker processes tasks from the taskQueue using a for-range loop.
 func worker(ctx context.Context, taskQueue chan ScanTask, cfg *config.Config, semaphore chan struct{}, metricsCollector *metrics.MetricsCollector, log *logrus.Logger) {
 	for task := range taskQueue {
 		select {
@@ -113,7 +112,9 @@ func worker(ctx context.Context, taskQueue chan ScanTask, cfg *config.Config, se
 			}).Debug("Worker picked up a task")
 			scanCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Scanning.Timeout)*time.Second)
 			defer cancel()
-			if err := scanTarget(scanCtx, task, cfg, metricsCollector, log); err != nil {
+
+			err := scanTarget(scanCtx, task, cfg, metricsCollector, log)
+			if err != nil {
 				log.WithFields(logrus.Fields{
 					"target":    task.Target,
 					"portRange": task.PortRange,
@@ -129,19 +130,34 @@ func worker(ctx context.Context, taskQueue chan ScanTask, cfg *config.Config, se
 func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsCollector *metrics.MetricsCollector, log *logrus.Logger) error {
 	scannerInstance, err := createNmapScanner(task, cfg, ctx)
 	if err != nil {
+		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol)
 		return fmt.Errorf("failed to create Nmap scanner: %w", err)
 	}
+
 	startTime := time.Now()
 	result, warnings, err := runNmapScan(ctx, scannerInstance, task, log)
 	if err != nil {
+		// Mark the scan as failed
+		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol)
 		return fmt.Errorf("failed to run Nmap scan: %w", err)
 	}
+
+	// If we got here, the scan ran (even if it found no open ports).
+	metricsCollector.IncrementScanSuccess(task.Target, task.PortRange, task.Protocol)
+	metricsCollector.SetLastScanTimestamp(task.Target, task.PortRange, task.Protocol, time.Now())
+
 	if warnings != nil {
 		log.Warn(warnings)
 	}
 	duration := time.Since(startTime).Seconds()
-	newResults := processNmapResults(result, task, log)
-	updateMetrics(task, cfg, duration, newResults, metricsCollector)
+	newResults, hostsUp, hostsDown := processNmapResults(result, task, log)
+
+	if cfg.Scanning.DurationMetrics {
+		metricsCollector.ObserveScanDuration(task.Target, task.PortRange, task.Protocol, duration)
+	}
+	metricsCollector.UpdateMetrics(createTargetKey(task.Target, task.PortRange), newResults)
+	metricsCollector.UpdateHostCounts(task.Target, hostsUp, hostsDown)
+
 	return nil
 }
 
@@ -179,6 +195,7 @@ func runNmapScan(ctx context.Context, scanner *nmap.Scanner, task ScanTask, log 
 			err:      err,
 		}
 	}()
+
 	select {
 	case <-ctx.Done():
 		log.WithField("target", task.Target).Warn("nmap scan timed out")
@@ -191,35 +208,37 @@ func runNmapScan(ctx context.Context, scanner *nmap.Scanner, task ScanTask, log 
 	}
 }
 
-// processNmapResults extracts open ports from the Nmap results.
-func processNmapResults(result *nmap.Run, task ScanTask, log *logrus.Logger) map[string]struct{} {
+// processNmapResults extracts open ports and host up/down information.
+func processNmapResults(result *nmap.Run, task ScanTask, log *logrus.Logger) (map[string]struct{}, int, int) {
 	newResults := make(map[string]struct{})
+	hostsUp := 0
+	hostsDown := 0
+
 	for _, host := range result.Hosts {
-		if len(host.Ports) == 0 || len(host.Addresses) == 0 {
-			continue
+		// Mark host up or down based on Nmap status.
+		if host.Status.State == "up" {
+			hostsUp++
+		} else {
+			hostsDown++
 		}
-		for _, port := range host.Ports {
-			if port.State.State == "open" {
-				portKey := fmt.Sprintf("%s:%d", host.Addresses[0], port.ID)
-				newResults[portKey] = struct{}{}
-				log.WithFields(logrus.Fields{
-					"ip":       host.Addresses[0],
-					"port":     port.ID,
-					"protocol": task.Protocol,
-				}).Debug("Open port found")
+
+		// Check ports
+		if len(host.Ports) > 0 && len(host.Addresses) > 0 {
+			for _, port := range host.Ports {
+				if port.State.State == "open" {
+					portKey := fmt.Sprintf("%s:%d", host.Addresses[0], port.ID)
+					newResults[portKey] = struct{}{}
+					log.WithFields(logrus.Fields{
+						"ip":       host.Addresses[0],
+						"port":     port.ID,
+						"protocol": task.Protocol,
+					}).Debug("Open port found")
+				}
 			}
 		}
 	}
-	return newResults
-}
 
-// updateMetrics updates the metrics collector with scan results.
-func updateMetrics(task ScanTask, cfg *config.Config, duration float64, newResults map[string]struct{}, metricsCollector *metrics.MetricsCollector) {
-	targetKey := createTargetKey(task.Target, task.PortRange)
-	if cfg.Scanning.DurationMetrics {
-		metricsCollector.ObserveScanDuration(task.Target, task.PortRange, task.Protocol, duration)
-	}
-	metricsCollector.UpdateMetrics(targetKey, newResults)
+	return newResults, hostsUp, hostsDown
 }
 
 // ------------------- PRIVATE HELPERS -------------------
