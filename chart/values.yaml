@@ -1,10 +1,8 @@
-# Default values for openport-exporter
-
 fullnameOverride: "openport-exporter"
 
 # The container image to deploy
 image:
-  repository: "renatogalera/openport-exporter"  
+  repository: "renatogalera/openport-exporter"
   tag: "v0.1.0"
   pullPolicy: "IfNotPresent"
 
@@ -127,12 +125,41 @@ config:
     timeout: 10800
     duration_metrics: true
     disable_dns_resolution: true
-    min_rate: 1000
-    min_parallelism: 1000
-  performance:
+    udp_scan: false
     rate_limit: 30
     task_queue_size: 1000
     worker_count: 2
+    # --- Nmap Performance Tuning Options ---
+    # For detailed explanations of these options, refer to the "Performance Tuning with Nmap Options" section in the chart's README.
+    # Minimum packet rate per second to send to the target. Increasing this can speed up scans.
+    # Be cautious with high values, as they might lead to inaccurate results or network congestion.
+    min_rate: 1000
+    # Maximum packet rate per second to send. Set to 0 for unlimited rate (only bounded by min_rate).
+    # Use this to limit scan speed and reduce network impact or avoid detection.
+    max_rate: 0
+    # Minimum number of probes to send in parallel during port scanning.
+    # Increasing this can speed up scans, especially when scanning many ports or hosts.
+    min_parallelism: 1000
+    # Maximum number of port scan probe retransmissions. Lowering this can speed up scans in reliable networks.
+    # However, it might lead to missed open ports in less reliable environments.
+    max_retries: 6
+    # Maximum time in seconds Nmap will spend scanning a single host.
+    # Reducing this timeout will make Nmap skip slow or down hosts, speeding up overall scan time.
+    host_timeout: 300 # seconds (5 minutes)
+    # Minimum delay in milliseconds between probes sent to a host.
+    # Increasing this can make scans slower and less intrusive, potentially avoiding detection.
+    scan_delay: 0 # milliseconds
+    # Maximum scan delay that Nmap will adjust to during runtime, in milliseconds.
+    max_scan_delay: 0 # milliseconds
+    # Initial round-trip time timeout for probes, in milliseconds. Lowering this can be beneficial in low-latency networks.
+    initial_rtt_timeout: 0 # milliseconds
+    # Maximum round-trip time timeout, in milliseconds.
+    max_rtt_timeout: 0 # milliseconds
+    # Minimum round-trip time timeout, in milliseconds.
+    min_rtt_timeout: 0 # milliseconds
+    # Disable Nmap host discovery (-Pn option). Assumes all target hosts are online.
+    # Can significantly speed up scans if you are certain targets are active. Use with caution.
+    disable_host_discovery: true
   # targets:
   #   - 179.190.33.0/24
   #   - 177.154.60.0/23
