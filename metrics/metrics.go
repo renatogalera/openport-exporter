@@ -10,6 +10,7 @@ import (
 
 // MetricsCollector encapsulates all Prometheus metrics.
 type MetricsCollector struct {
+	// Existing metrics
 	openPorts           *prometheus.GaugeVec
 	openPortsTotal      *prometheus.GaugeVec
 	scanDuration        *prometheus.GaugeVec
@@ -17,6 +18,13 @@ type MetricsCollector struct {
 	scanTimeouts        *prometheus.CounterVec
 	workerUtilization   *prometheus.GaugeVec
 	scannedTargets      sync.Map
+
+	// New metrics
+	hostUpCount       *prometheus.GaugeVec
+	hostDownCount     *prometheus.GaugeVec
+	scansSuccessful   *prometheus.CounterVec
+	scansFailed       *prometheus.CounterVec
+	lastScanTimestamp *prometheus.GaugeVec
 }
 
 // NewMetricsCollector creates and initializes a new MetricsCollector.
@@ -25,43 +33,80 @@ func NewMetricsCollector() *MetricsCollector {
 		openPorts: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "open_port_status",
-				Help: "Open ports detected by SYN scan",
+				Help: "Open ports detected by SYN scan (1 for open, 0 for closed).",
 			},
 			[]string{"ip", "port", "protocol"},
 		),
 		openPortsTotal: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "open_ports_total",
-				Help: "Total number of open ports per IP",
+				Help: "Total number of open ports per IP.",
 			},
 			[]string{"ip"},
 		),
 		scanDuration: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "scan_duration_seconds",
-				Help: "Duration of the last port scan in seconds",
+				Help: "Duration of the last port scan in seconds.",
 			},
 			[]string{"target", "port_range", "protocol"},
 		),
 		taskQueueSizeMetric: prometheus.NewGauge(
 			prometheus.GaugeOpts{
 				Name: "task_queue_size",
-				Help: "The current size of the task queue",
+				Help: "The current size of the task queue.",
 			},
 		),
 		scanTimeouts: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "nmap_scan_timeouts_total",
-				Help: "Total number of Nmap scans that timed out",
+				Help: "Total number of Nmap scans that timed out.",
 			},
 			[]string{"target", "port_range", "protocol"},
 		),
 		workerUtilization: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
 				Name: "worker_utilization",
-				Help: "Number of currently busy workers out of the total worker pool",
+				Help: "Number of currently busy workers out of the total worker pool.",
 			},
 			[]string{"state"},
+		),
+
+		// New metrics
+		hostUpCount: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "nmap_host_up_count",
+				Help: "Number of hosts found up during the last scan for a target.",
+			},
+			[]string{"target"},
+		),
+		hostDownCount: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "nmap_host_down_count",
+				Help: "Number of hosts found down (unreachable) during the last scan for a target.",
+			},
+			[]string{"target"},
+		),
+		scansSuccessful: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "scans_successful_total",
+				Help: "Total number of successfully completed scans (no error) per target, port_range, and protocol.",
+			},
+			[]string{"target", "port_range", "protocol"},
+		),
+		scansFailed: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "scans_failed_total",
+				Help: "Total number of scans that failed (encountered an error) per target, port_range, and protocol.",
+			},
+			[]string{"target", "port_range", "protocol"},
+		),
+		lastScanTimestamp: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "last_scan_timestamp_seconds",
+				Help: "Unix timestamp of the last scan for a given target, port_range, and protocol.",
+			},
+			[]string{"target", "port_range", "protocol"},
 		),
 	}
 	return mc
@@ -75,6 +120,13 @@ func (mc *MetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	mc.taskQueueSizeMetric.Describe(ch)
 	mc.scanTimeouts.Describe(ch)
 	mc.workerUtilization.Describe(ch)
+
+	// New metrics
+	mc.hostUpCount.Describe(ch)
+	mc.hostDownCount.Describe(ch)
+	mc.scansSuccessful.Describe(ch)
+	mc.scansFailed.Describe(ch)
+	mc.lastScanTimestamp.Describe(ch)
 }
 
 // Collect is called by the Prometheus registry when collecting metrics.
@@ -85,15 +137,18 @@ func (mc *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	mc.taskQueueSizeMetric.Collect(ch)
 	mc.scanTimeouts.Collect(ch)
 	mc.workerUtilization.Collect(ch)
+
+	// New metrics
+	mc.hostUpCount.Collect(ch)
+	mc.hostDownCount.Collect(ch)
+	mc.scansSuccessful.Collect(ch)
+	mc.scansFailed.Collect(ch)
+	mc.lastScanTimestamp.Collect(ch)
 }
 
-// ScanInfo holds information about a scan.
-type ScanInfo struct {
-	Ports    map[string]struct{}
-	LastScan time.Time
-}
+// ------------------- EXISTING METHODS -------------------
 
-// UpdateMetrics updates the metrics with new scan results.
+// UpdateMetrics updates the metrics with new scan results (open ports).
 func (mc *MetricsCollector) UpdateMetrics(targetKey string, newResults map[string]struct{}) {
 	prevScanInfo := mc.getPreviousScanInfo(targetKey)
 	mc.updateNewOpenPorts(newResults)
@@ -140,7 +195,36 @@ func (mc *MetricsCollector) UpdateWorkerUtilization(busy int) {
 	mc.workerUtilization.WithLabelValues("busy").Set(float64(busy))
 }
 
+// ------------------- NEW METHODS -------------------
+
+// UpdateHostCounts updates the number of hosts found up/down for a given target.
+func (mc *MetricsCollector) UpdateHostCounts(target string, up, down int) {
+	mc.hostUpCount.WithLabelValues(target).Set(float64(up))
+	mc.hostDownCount.WithLabelValues(target).Set(float64(down))
+}
+
+// IncrementScanSuccess increments the counter for successful scans.
+func (mc *MetricsCollector) IncrementScanSuccess(target, portRange, protocol string) {
+	mc.scansSuccessful.WithLabelValues(target, portRange, protocol).Inc()
+}
+
+// IncrementScanFailure increments the counter for failed scans.
+func (mc *MetricsCollector) IncrementScanFailure(target, portRange, protocol string) {
+	mc.scansFailed.WithLabelValues(target, portRange, protocol).Inc()
+}
+
+// SetLastScanTimestamp sets the Unix timestamp of the last scan for a target.
+func (mc *MetricsCollector) SetLastScanTimestamp(target, portRange, protocol string, ts time.Time) {
+	mc.lastScanTimestamp.WithLabelValues(target, portRange, protocol).Set(float64(ts.Unix()))
+}
+
 // ------------------- PRIVATE METHODS -------------------
+
+// ScanInfo holds information about a scan.
+type ScanInfo struct {
+	Ports    map[string]struct{}
+	LastScan time.Time
+}
 
 func (mc *MetricsCollector) getPreviousScanInfo(targetKey string) *ScanInfo {
 	prevScanInfoInterface, _ := mc.scannedTargets.Load(targetKey)
