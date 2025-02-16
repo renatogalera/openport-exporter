@@ -73,9 +73,7 @@ func TestHandleQuery(t *testing.T) {
 			Interval:        10,
 			MaxCIDRSize:     24,
 			DurationMetrics: true,
-		},
-		Performance: config.PerformanceConfig{
-			RateLimit: 5,
+			RateLimit:       5,
 		},
 	}
 	rateLimiter := rate.NewLimiter(5, 1)

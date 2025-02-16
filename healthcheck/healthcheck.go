@@ -14,7 +14,7 @@ import (
 func HealthCheckHandler(taskQueue chan scanner.ScanTask, cfg *config.Config, log *logrus.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		queueSize := len(taskQueue)
-		if queueSize >= cfg.Performance.TaskQueueSize {
+		if queueSize >= cfg.Scanning.TaskQueueSize {
 			log.WithField("queue_size", queueSize).Warn("task queue is full")
 			http.Error(w, "task queue is full", http.StatusServiceUnavailable)
 			return
