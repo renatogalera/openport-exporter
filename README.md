@@ -2,6 +2,8 @@
 
 OpenPort Exporter is an nmap-based tool that scans a list of IP addresses and ports and exposes the results as Prometheus metrics. It supports both TCP and UDP scans and provides detailed metrics to monitor your network's security posture.
 
+[https://github.com/renatogalera/openport-exporter](https://github.com/renatogalera/openport-exporter)
+
 ## Configuration Options
 
 The table below outlines all configurable options available in `config.yaml` for OpenPort Exporter.
