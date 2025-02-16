@@ -20,11 +20,13 @@ type MetricsCollector struct {
 	scannedTargets      sync.Map
 
 	// New metrics
-	hostUpCount       *prometheus.GaugeVec
-	hostDownCount     *prometheus.GaugeVec
-	scansSuccessful   *prometheus.CounterVec
-	scansFailed       *prometheus.CounterVec
-	lastScanTimestamp *prometheus.GaugeVec
+	hostUpCount           *prometheus.GaugeVec
+	hostDownCount         *prometheus.GaugeVec
+	scansSuccessful       *prometheus.CounterVec
+	scansFailed           *prometheus.CounterVec
+	lastScanTimestamp     *prometheus.GaugeVec
+	portStateChanges      *prometheus.CounterVec
+	scanDurationHistogram *prometheus.HistogramVec
 }
 
 // NewMetricsCollector creates and initializes a new MetricsCollector.
@@ -71,7 +73,6 @@ func NewMetricsCollector() *MetricsCollector {
 			},
 			[]string{"state"},
 		),
-
 		// New metrics
 		hostUpCount: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -94,12 +95,13 @@ func NewMetricsCollector() *MetricsCollector {
 			},
 			[]string{"target", "port_range", "protocol"},
 		),
+		// Added label "error_type"
 		scansFailed: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "scans_failed_total",
-				Help: "Total number of scans that failed (encountered an error) per target, port_range, and protocol.",
+				Help: "Total number of scans that failed (encountered an error) per target, port_range, protocol, and error type.",
 			},
-			[]string{"target", "port_range", "protocol"},
+			[]string{"target", "port_range", "protocol", "error_type"},
 		),
 		lastScanTimestamp: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -108,8 +110,28 @@ func NewMetricsCollector() *MetricsCollector {
 			},
 			[]string{"target", "port_range", "protocol"},
 		),
+		portStateChanges: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "port_state_changes_total",
+				Help: "Total number of port state changes (open -> closed or closed -> open) per target.",
+			},
+			[]string{"target", "change_type"}, // "closed_to_open", "open_to_closed"
+		),
+		scanDurationHistogram: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "scan_duration_histogram_seconds",
+				Help:    "Histogram of scan durations in seconds.",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"target", "port_range", "protocol"},
+		),
 	}
 	return mc
+}
+
+// GetScanDurationHistogram returns the scan duration histogram.
+func (mc *MetricsCollector) GetScanDurationHistogram() *prometheus.HistogramVec {
+	return mc.scanDurationHistogram
 }
 
 // Describe sends the super-set of all descriptors of metrics to the provided channel.
@@ -127,6 +149,8 @@ func (mc *MetricsCollector) Describe(ch chan<- *prometheus.Desc) {
 	mc.scansSuccessful.Describe(ch)
 	mc.scansFailed.Describe(ch)
 	mc.lastScanTimestamp.Describe(ch)
+	mc.portStateChanges.Describe(ch)
+	mc.scanDurationHistogram.Describe(ch)
 }
 
 // Collect is called by the Prometheus registry when collecting metrics.
@@ -144,6 +168,8 @@ func (mc *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	mc.scansSuccessful.Collect(ch)
 	mc.scansFailed.Collect(ch)
 	mc.lastScanTimestamp.Collect(ch)
+	mc.portStateChanges.Collect(ch)
+	mc.scanDurationHistogram.Collect(ch)
 }
 
 // ------------------- EXISTING METHODS -------------------
@@ -151,6 +177,8 @@ func (mc *MetricsCollector) Collect(ch chan<- prometheus.Metric) {
 // UpdateMetrics updates the metrics with new scan results (open ports).
 func (mc *MetricsCollector) UpdateMetrics(targetKey string, newResults map[string]struct{}) {
 	prevScanInfo := mc.getPreviousScanInfo(targetKey)
+	// Record port state changes before updating current scan data.
+	mc.updatePortStateChanges(targetKey, prevScanInfo.Ports, newResults)
 	mc.updateNewOpenPorts(newResults)
 	mc.updateClosedPorts(prevScanInfo.Ports, newResults)
 	mc.updateOpenPortsTotal(prevScanInfo.Ports, newResults)
@@ -208,9 +236,9 @@ func (mc *MetricsCollector) IncrementScanSuccess(target, portRange, protocol str
 	mc.scansSuccessful.WithLabelValues(target, portRange, protocol).Inc()
 }
 
-// IncrementScanFailure increments the counter for failed scans.
-func (mc *MetricsCollector) IncrementScanFailure(target, portRange, protocol string) {
-	mc.scansFailed.WithLabelValues(target, portRange, protocol).Inc()
+// IncrementScanFailure increments the counter for failed scans with an error type.
+func (mc *MetricsCollector) IncrementScanFailure(target, portRange, protocol, errorType string) {
+	mc.scansFailed.WithLabelValues(target, portRange, protocol, errorType).Inc()
 }
 
 // SetLastScanTimestamp sets the Unix timestamp of the last scan for a target.
@@ -295,4 +323,20 @@ func (mc *MetricsCollector) storeCurrentScanInfo(targetKey string, newResults ma
 		Ports:    newResults,
 		LastScan: time.Now(),
 	})
+}
+
+// updatePortStateChanges tracks changes in port state between scans.
+func (mc *MetricsCollector) updatePortStateChanges(targetKey string, prevPorts, newPorts map[string]struct{}) {
+	for portKey := range newPorts {
+		if _, existed := prevPorts[portKey]; !existed {
+			// Port was previously closed and is now open.
+			mc.portStateChanges.WithLabelValues(targetKey, "closed_to_open").Inc()
+		}
+	}
+	for portKey := range prevPorts {
+		if _, stillOpen := newPorts[portKey]; !stillOpen {
+			// Port was open and is now closed.
+			mc.portStateChanges.WithLabelValues(targetKey, "open_to_closed").Inc()
+		}
+	}
 }
