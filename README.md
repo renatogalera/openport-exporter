@@ -320,3 +320,7 @@ sudo go run main.go
 ```bash
 go test -v ./...
 ```
+
+## License
+
+This project is licensed under the [MIT](./LICENSE) license.
