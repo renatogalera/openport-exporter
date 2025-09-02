@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os/exec"
 	"reflect"
 	"testing"
 	"time"
@@ -231,6 +232,10 @@ func (e errf) Error() string { return string(e) }
 // --- createNmapScanner sanity (does not run nmap) ---
 
 func TestCreateNmapScanner_TCPAndUDP_DoNotError(t *testing.T) {
+	// Skip if nmap is not available in PATH on the CI/host.
+	if _, err := exec.LookPath("nmap"); err != nil {
+		t.Skip("skipping: nmap binary not found in PATH")
+	}
 	ctx := context.Background()
 	cfg := &cfgpkg.Config{}
 	// Default: UseSYNScanEnabled() == true (via LoadConfig), but here cfg has nil UseSYNScan.
