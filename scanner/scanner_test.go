@@ -10,7 +10,7 @@ import (
 	"github.com/renatogalera/openport-exporter/config"
 	"github.com/renatogalera/openport-exporter/metrics"
 
-	"github.com/Ullaakut/nmap"
+	"github.com/Ullaakut/nmap/v3"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 )

@@ -12,7 +12,7 @@ import (
 	"github.com/renatogalera/openport-exporter/config"
 	"github.com/renatogalera/openport-exporter/metrics"
 
-	"github.com/Ullaakut/nmap"
+	"github.com/Ullaakut/nmap/v3"
 	"github.com/c-robinson/iplib"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
@@ -146,8 +146,8 @@ func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsC
 	metricsCollector.IncrementScanSuccess(task.Target, task.PortRange, task.Protocol)
 	metricsCollector.SetLastScanTimestamp(task.Target, task.PortRange, task.Protocol, time.Now())
 
-	if warnings != nil {
-		log.Warn(warnings)
+	if warnings != nil && len(*warnings) > 0 {
+		log.Warn(*warnings)
 	}
 	duration := time.Since(startTime).Seconds()
 	if cfg.Scanning.DurationMetrics {
@@ -163,10 +163,9 @@ func scanTarget(ctx context.Context, task ScanTask, cfg *config.Config, metricsC
 
 // createNmapScanner builds an Nmap scanner with the specified options based on configuration.
 func createNmapScanner(task ScanTask, cfg *config.Config, ctx context.Context) (*nmap.Scanner, error) {
-	scannerOptions := []func(*nmap.Scanner){
+	scannerOptions := []nmap.Option{
 		nmap.WithTargets(task.Target),
 		nmap.WithPorts(task.PortRange),
-		nmap.WithContext(ctx),
 		nmap.WithSYNScan(),
 	}
 
@@ -195,22 +194,18 @@ func createNmapScanner(task ScanTask, cfg *config.Config, ctx context.Context) (
 	if cfg.Scanning.DisableDNSResolution {
 		scannerOptions = append(scannerOptions, nmap.WithDisabledDNSResolution()) // -n (no DNS resolution)
 	}
-	customArgs := []string{}
+
 	if cfg.Scanning.InitialRttTimeout > 0 {
-		customArgs = append(customArgs, fmt.Sprintf("--initial-rtt-timeout=%dms", cfg.Scanning.InitialRttTimeout))
+		scannerOptions = append(scannerOptions, nmap.WithInitialRTTTimeout(time.Duration(cfg.Scanning.InitialRttTimeout)*time.Millisecond))
 	}
 	if cfg.Scanning.MaxRttTimeout > 0 {
-		customArgs = append(customArgs, fmt.Sprintf("--max-rtt-timeout=%dms", cfg.Scanning.MaxRttTimeout))
+		scannerOptions = append(scannerOptions, nmap.WithMaxRTTTimeout(time.Duration(cfg.Scanning.MaxRttTimeout)*time.Millisecond))
 	}
 	if cfg.Scanning.MinRttTimeout > 0 {
-		customArgs = append(customArgs, fmt.Sprintf("--min-rtt-timeout=%dms", cfg.Scanning.MinRttTimeout))
+		scannerOptions = append(scannerOptions, nmap.WithMinRTTTimeout(time.Duration(cfg.Scanning.MinRttTimeout)*time.Millisecond))
 	}
 	if cfg.Scanning.DisableHostDiscovery {
-		customArgs = append(customArgs, "-Pn")
-	}
-
-	if len(customArgs) > 0 {
-		scannerOptions = append(scannerOptions, nmap.WithCustomArguments(customArgs...))
+		scannerOptions = append(scannerOptions, nmap.WithSkipHostDiscovery()) // -Pn
 	}
 
 	// Support for UDP scan if configured.
@@ -218,18 +213,18 @@ func createNmapScanner(task ScanTask, cfg *config.Config, ctx context.Context) (
 		scannerOptions = append(scannerOptions, nmap.WithUDPScan()) // -sU
 	}
 
-	return nmap.NewScanner(scannerOptions...)
+	return nmap.NewScanner(ctx, scannerOptions...)
 }
 
 // scanResult is a consolidated type for the Nmap scan result.
 type scanResult struct {
 	result   *nmap.Run
-	warnings []string
+	warnings *[]string
 	err      error
 }
 
 // runNmapScan executes the Nmap scan and returns the results via a single channel.
-func runNmapScan(ctx context.Context, scanner *nmap.Scanner, task ScanTask, log *logrus.Logger) (*nmap.Run, []string, error) {
+func runNmapScan(ctx context.Context, scanner *nmap.Scanner, task ScanTask, log *logrus.Logger) (*nmap.Run, *[]string, error) {
 	resultCh := make(chan scanResult, 1)
 	go func() {
 		result, warnings, err := scanner.Run()
