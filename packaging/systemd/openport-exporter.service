@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenPort Exporter
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=openport
+Group=openport
+EnvironmentFile=-/etc/default/openport-exporter
+ExecStart=/usr/bin/openport-exporter --config.path=/etc/openport-exporter/config.yaml $EXTRA_ARGS
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
+
