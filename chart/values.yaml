@@ -2,8 +2,8 @@ fullnameOverride: "openport-exporter"
 
 # The container image to deploy
 image:
-  repository: "renatogalera/openport-exporter"
-  tag: "v0.1.0"
+  repository: ghcr.io/renatogalera/openport-exporter
+  tag: ${VERSION}
   pullPolicy: "IfNotPresent"
 
 # Replica count for the Deployment
@@ -30,6 +30,34 @@ serviceAccount:
 extraEnv: []
   # - name: EXAMPLE_ENV
   #   value: "someValue"
+
+
+# Optional extra args passed to the exporter
+extraArgs: []
+  # Exporter flags (examples — uncomment as needed):
+  # - --log.level=info                 # debug|info|warn|error
+  # - --log.format=json                # text|json
+  # - --metrics.path=/metrics
+  # - --listen.port=9919
+  # - --address=localhost
+  # - --config.path=/app/config.yaml
+  # - --collector.go                   # enable Go runtime metrics
+  # - --collector.build_info=false     # disable build_info collector
+  # Prober endpoint (opt-in, disabled by default):
+  # - --prober.enable
+  # - --prober.allow_cidr=192.168.0.0/16       # repeatable
+  # - --prober.allow_cidr=10.0.0.0/8           # repeatable
+  # - --prober.client_allow_cidr=10.0.0.0/8    # repeatable (client IPs)
+  # - --prober.rate_limit=1
+  # - --prober.burst=1
+  # - --prober.max_cidr_size=24
+  # - --prober.max_concurrent=1
+  # - --prober.max_ports=4096
+  # - --prober.max_targets=32
+  # - --prober.default_timeout=10s
+  # - --prober.auth_token=changeme
+  # - --prober.basic_user=user
+  # - --prober.basic_pass=pass
 
 # Resource requests and limits
 resources:
@@ -63,6 +91,7 @@ containerSecurityContext: {}
 # Readiness and Liveness probes configuration
 readinessProbe:
   enabled: true
+  path: "/-/ready"
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 3
@@ -70,6 +99,7 @@ readinessProbe:
 
 livenessProbe:
   enabled: true
+  path: "/-/healthy"
   initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 3
@@ -103,12 +133,6 @@ serviceMonitor:
   annotations: {}
   namespace: ""
 
-# Basic Auth
-basicAuth:
-  enabled: false
-  username: "admin"
-  password: "secret"
-
 # Additional labels and annotations for the ConfigMap (optional)
 configMap:
   labels: {}
@@ -119,16 +143,17 @@ config:
   server:
     port: 9919
   scanning:
-    interval: 86400
+    interval: 10800
     port_range: "1-65535"
-    max_cidr_size: 28
-    timeout: 10800
+    max_cidr_size: 24
+    timeout: 3600
     duration_metrics: true
     disable_dns_resolution: true
     udp_scan: false
-    rate_limit: 30
-    task_queue_size: 1000
-    worker_count: 2
+    use_syn_scan: true
+    rate_limit: 60
+    task_queue_size: 100
+    worker_count: 5
     # --- Nmap Performance Tuning Options ---
     # For detailed explanations of these options, refer to the "Performance Tuning with Nmap Options" section in the chart's README.
     # Minimum packet rate per second to send to the target. Increasing this can speed up scans.
@@ -160,7 +185,50 @@ config:
     # Disable Nmap host discovery (-Pn option). Assumes all target hosts are online.
     # Can significantly speed up scans if you are certain targets are active. Use with caution.
     disable_host_discovery: true
-  # targets:
-  #   - 179.190.33.0/24
-  #   - 177.154.60.0/23
-  #   - 148.59.72.0/24
+  # Basic auth (optional)
+  auth:
+    basic:
+      username: ""
+      password: ""
+  # Periodic scan targets
+  targets:
+    - "192.168.1.0/24"
+    - "10.0.0.0/24"
+  # Prober configuration (YAML; prefer this over extraArgs)
+  prober:
+    enabled: false
+    allow_cidrs: []             # e.g., ["10.0.0.0/8", "192.168.0.0/16"]
+    client_allow_cidrs: []      # who can call /probe (client IPs)
+    rate_limit: 1
+    burst: 1
+    max_cidr_size: 24
+    max_concurrent: 1
+    default_timeout: "10s"
+    max_ports: 4096
+    max_targets: 32
+    auth_token: ""
+    basic_user: ""
+    basic_pass: ""
+
+    # Prober modules (optional presets)
+    modules:
+      tcp_syn_fast:
+        protocol: tcp
+        ports: "22,80,443,1000-1024"
+        use_syn_scan: true
+        min_rate: 2000
+        min_parallelism: 1000
+        max_retries: 3
+        host_timeout: 180
+        disable_host_discovery: true
+      tcp_connect_safe:
+        protocol: tcp
+        ports: "22,80,443"
+        use_syn_scan: false
+        max_retries: 2
+        host_timeout: 120
+      udp_basic:
+        protocol: udp
+        ports: "53,123"
+        max_retries: 3
+        host_timeout: 120
