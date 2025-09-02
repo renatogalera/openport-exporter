@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "fullnameOverride": { "type": "string" },
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["IfNotPresent", "Always", "Never"] }
+      },
+      "required": ["repository", "tag", "pullPolicy"]
+    },
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "deployment": {
+      "type": "object",
+      "properties": {
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "type": ["integer", "string"] },
+        "maxUnavailable": { "type": ["integer", "string"] },
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" }
+      }
+    },
+    "extraEnv": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "required": ["name", "value"]
+      }
+    },
+    "extraArgs": { "type": "array", "items": { "type": "string" } },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "cpu": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        }
+      }
+    },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
+    "affinity": { "type": "object" },
+    "podSecurityContext": { "type": "object" },
+    "containerSecurityContext": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "readinessProbe": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string" },
+        "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "livenessProbe": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "path": { "type": "string" },
+        "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": { "type": "string" },
+        "annotations": { "type": "object" },
+        "tls": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "annotations": { "type": "object" }
+      },
+      "required": ["type", "port"]
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval": { "type": "string" },
+        "scrapeTimeout": { "type": "string" },
+        "labels": { "type": "object" },
+        "annotations": { "type": "object" },
+        "namespace": { "type": "string" }
+      }
+    },
+    "configMap": {
+      "type": "object",
+      "properties": {
+        "labels": { "type": "object" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "object",
+          "properties": { "port": { "type": "integer", "minimum": 0, "maximum": 65535 } }
+        },
+        "scanning": {
+          "type": "object",
+          "properties": {
+            "interval": { "type": "integer", "minimum": 1 },
+            "port_range": { "type": "string" },
+            "max_cidr_size": { "type": "integer", "minimum": 1, "maximum": 128 },
+            "timeout": { "type": "integer", "minimum": 1 },
+            "duration_metrics": { "type": "boolean" },
+            "disable_dns_resolution": { "type": "boolean" },
+            "udp_scan": { "type": "boolean" },
+            "use_syn_scan": { "type": ["boolean", "null"] },
+            "rate_limit": { "type": "integer", "minimum": 0 },
+            "task_queue_size": { "type": "integer", "minimum": 1 },
+            "worker_count": { "type": "integer", "minimum": 1 },
+            "min_rate": { "type": "integer", "minimum": 0 },
+            "max_rate": { "type": "integer", "minimum": 0 },
+            "min_parallelism": { "type": "integer", "minimum": 0 },
+            "max_retries": { "type": "integer", "minimum": 0 },
+            "host_timeout": { "type": "integer", "minimum": 0 },
+            "scan_delay": { "type": "integer", "minimum": 0 },
+            "max_scan_delay": { "type": "integer", "minimum": 0 },
+            "initial_rtt_timeout": { "type": "integer", "minimum": 0 },
+            "max_rtt_timeout": { "type": "integer", "minimum": 0 },
+            "min_rtt_timeout": { "type": "integer", "minimum": 0 },
+            "disable_host_discovery": { "type": "boolean" }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "basic": {
+              "type": "object",
+              "properties": {
+                "username": { "type": "string" },
+                "password": { "type": "string" }
+              }
+            }
+          }
+        },
+        "targets": { "type": "array", "items": { "type": "string" } },
+        "prober": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allow_cidrs": { "type": "array", "items": { "type": "string" } },
+            "client_allow_cidrs": { "type": "array", "items": { "type": "string" } },
+            "rate_limit": { "type": "number", "minimum": 0 },
+            "burst": { "type": "integer", "minimum": 0 },
+            "max_cidr_size": { "type": "integer", "minimum": 1, "maximum": 128 },
+            "max_concurrent": { "type": "integer", "minimum": 1 },
+            "default_timeout": { "type": "string" },
+            "max_ports": { "type": "integer", "minimum": 1 },
+            "max_targets": { "type": "integer", "minimum": 1 },
+            "auth_token": { "type": "string" },
+            "basic_user": { "type": "string" },
+            "basic_pass": { "type": "string" },
+            "modules": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "properties": {
+                  "protocol": { "type": ["string", "null"], "enum": ["tcp", "udp", null] },
+                  "ports": { "type": ["string", "null"] },
+                  "use_syn_scan": { "type": ["boolean", "null"] },
+                  "min_rate": { "type": ["integer", "null"], "minimum": 0 },
+                  "max_rate": { "type": ["integer", "null"], "minimum": 0 },
+                  "min_parallelism": { "type": ["integer", "null"], "minimum": 0 },
+                  "max_retries": { "type": ["integer", "null"], "minimum": 0 },
+                  "host_timeout": { "type": ["integer", "null"], "minimum": 0 },
+                  "scan_delay": { "type": ["integer", "null"], "minimum": 0 },
+                  "max_scan_delay": { "type": ["integer", "null"], "minimum": 0 },
+                  "initial_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
+                  "max_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
+                  "min_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
+                  "disable_host_discovery": { "type": ["boolean", "null"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["image", "replicaCount", "service"]
+}

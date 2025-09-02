@@ -1,28 +1,80 @@
+############################################
+# OpenPort Exporter - Application Config   #
+############################################
+
 # Server configuration
 server:
+  # TCP port where the HTTP server listens (/-/healthy, /-/ready, /metrics)
   port: 9919
 
-# Scanning configuration  
+# Scanning configuration
 scanning:
-  interval: 86400
+  # Interval between background scans (seconds)
+  interval: 10800
+  # Port selection for background scans
   port_range: "1-65535"
+  # Max subnet mask when splitting large CIDRs for parallel scanning
   max_cidr_size: 24
+  # Hard timeout per subnet scan (seconds)
   timeout: 3600
-  duration_metrics: false
+  # Export scan duration metrics
+  duration_metrics: true
+  # Disable reverse DNS resolution in nmap
   disable_dns_resolution: true
+  # When true, perform UDP scans (exclusive from TCP in a given task)
+  udp_scan: false
+  # Use TCP SYN scan (requires CAP_NET_RAW). If false, use TCP connect() scan.
+  use_syn_scan: true
 
-# Performance configuration
-  rate_limit: 30
-  task_queue_size: 1000
-  worker_count: 10
-  min_rate: 1500 # Increases the minimum packet rate per second
-  max_rate: 0 # No maximum limit (0 or clear to disable)
-  min_parallelism: 1200 # Increases the minimum parallelism
-  max_retries: 5 # Decreases the maximum number of retries
-  host_timeout: 240 # Decreases the per-host timeout to 4 minutes
-  scan_delay: 1 # Adds a small delay between probes (in ms)
-  max_scan_delay: 10 # Maximum adjustable delay (in ms)
-  initial_rtt_timeout: 100 # Initial RTT timeout (in ms)
-  max_rtt_timeout: 2000 # Maximum RTT timeout (in ms)
-  min_rtt_timeout: 50 # Minimum RTT timeout (in ms) ms)
-  disable_host_discovery: true # Disable host discovery (-Pn) for faster speed (if applicable)
+  # Queue and workers
+  rate_limit: 60           # Legacy field (not used by code paths currently)
+  task_queue_size: 100
+  worker_count: 5
+
+  # Nmap performance tuning
+  min_rate: 1000           # packets/sec minimum
+  max_rate: 0              # 0 = unlimited
+  min_parallelism: 1000
+  max_retries: 6
+  host_timeout: 300        # seconds
+  scan_delay: 0            # milliseconds
+  max_scan_delay: 0        # milliseconds
+  initial_rtt_timeout: 0   # milliseconds
+  max_rtt_timeout: 0       # milliseconds
+  min_rtt_timeout: 0       # milliseconds
+  disable_host_discovery: true  # -Pn
+
+# Optional basic authentication for the main /metrics endpoint
+auth:
+  basic:
+    username: ""
+    password: ""
+
+# Targets set to be scanned continuously by the background workers
+targets:
+  - "192.168.1.0/24"
+  - "10.0.0.0/24"
+
+# Optional presets (modules) used by /probe endpoint
+prober:
+  modules:
+    tcp_syn_fast:
+      protocol: tcp
+      ports: "22,80,443,1000-1024"
+      use_syn_scan: true
+      min_rate: 2000
+      min_parallelism: 1000
+      max_retries: 3
+      host_timeout: 180
+      disable_host_discovery: true
+    tcp_connect_safe:
+      protocol: tcp
+      ports: "22,80,443"
+      use_syn_scan: false
+      max_retries: 2
+      host_timeout: 120
+    udp_basic:
+      protocol: udp
+      ports: "53,123"
+      max_retries: 3
+      host_timeout: 120
