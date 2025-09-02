@@ -1,0 +1,61 @@
+name: Release Helm Chart (OCI)
+
+on:
+  push:
+    tags: ['chart-*']
+  workflow_dispatch:
+
+env:
+  CHART_DIR: charts/openport-exporter
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract chart version from tag
+        id: v
+        run: |
+          VERSION="${GITHUB_REF_NAME#chart-}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.18.5
+
+      - name: Install yq
+        uses: mikefarah/yq@v4
+
+      - name: Validate Chart.yaml version == tag
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          FILE="$CHART_DIR/Chart.yaml"
+          test -f "$FILE"
+          CHART_VER="$(yq '.version' "$FILE")"
+          if [ "$CHART_VER" != "$VERSION" ]; then
+            echo "Chart.yaml version ($CHART_VER) != tag ($VERSION)"
+            exit 1
+          fi
+          echo "OK: Chart.yaml version matches tag $VERSION"
+
+      - name: Lint & Package
+        run: |
+          helm dependency build "$CHART_DIR" || true
+          helm lint "$CHART_DIR"
+          helm package "$CHART_DIR" --destination dist
+
+      - name: Push to GHCR (OCI)
+        env:
+          HELM_EXPERIMENTAL_OCI: 1
+        run: |
+          CHART=$(ls dist/*.tgz)
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Push to ghcr.io/<owner>/<chart-name>:<version>
+          helm push "$CHART" oci://ghcr.io/${{ github.repository_owner }}
