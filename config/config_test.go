@@ -20,7 +20,6 @@ scanning:
   disable_dns_resolution: false
   min_rate: 500
   min_parallelism: 5
-performance:
   rate_limit: 30
   task_queue_size: 50
   worker_count: 3

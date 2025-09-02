@@ -179,7 +179,6 @@ server:
 scanning:
   interval: 3600
   port_range: "1-1000"
-Scanning:
   rate_limit: 30
   task_queue_size: 50
   worker_count: 3
