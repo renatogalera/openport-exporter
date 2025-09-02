@@ -10,7 +10,7 @@ import (
 	"github.com/renatogalera/openport-exporter/config"
 	"github.com/renatogalera/openport-exporter/metrics"
 
-	"github.com/Ullaakut/nmap"
+	"github.com/Ullaakut/nmap/v3"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 )
@@ -100,6 +100,7 @@ func TestProcessNmapResults(t *testing.T) {
 	result := &nmap.Run{
 		Hosts: []nmap.Host{
 			{
+				Status: nmap.Status{State: "up"},
 				Addresses: []nmap.Address{
 					{Addr: "192.168.1.1"},
 				},
