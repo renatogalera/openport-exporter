@@ -3,7 +3,8 @@ version: 2
 project_name: "openport-exporter"
 
 builds:
-  - env:
+  - id: main
+    env:
       - CGO_ENABLED=0
     goos:
       - linux
@@ -20,6 +21,47 @@ builds:
 archives:
   - format: tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+# Linux packages (.deb/.rpm) via nfpm
+nfpms:
+  - id: linux_pkgs
+    package_name: "{{ .ProjectName }}"
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Arch }}"
+    homepage: "https://github.com/renatogalera/openport-exporter"
+    maintainer: "OpenPort Exporter"
+    description: "Prometheus exporter that uses Nmap to scan open ports"
+    license: MIT
+    vendor: "OpenPort"
+    section: default
+    priority: extra
+    binds: []
+    suggests: []
+    recommends:
+      - nmap
+    depends:
+      - nmap
+    builds:
+      - main
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    contents:
+      - src: ./LICENSE
+        dst: /usr/share/doc/{{ .ProjectName }}/LICENSE
+      - src: ./config.yaml
+        dst: /etc/{{ .ProjectName }}/config.yaml
+        type: config|noreplace
+      - src: ./packaging/systemd/openport-exporter.service
+        dst: /lib/systemd/system/openport-exporter.service
+      - src: ./packaging/defaults/openport-exporter.env
+        dst: /etc/default/openport-exporter
+        type: config|noreplace
+    scripts:
+      preinstall: packaging/scripts/preinstall.sh
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+      postremove: packaging/scripts/postremove.sh
 
 release:
   github:
