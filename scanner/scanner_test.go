@@ -100,6 +100,7 @@ func TestProcessNmapResults(t *testing.T) {
 	result := &nmap.Run{
 		Hosts: []nmap.Host{
 			{
+				Status: nmap.Status{State: "up"},
 				Addresses: []nmap.Address{
 					{Addr: "192.168.1.1"},
 				},
