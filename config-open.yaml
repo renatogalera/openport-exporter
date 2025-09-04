@@ -1,0 +1,84 @@
+#################################################################################################
+# OpenPort Exporter - Open (Unrestricted) Configuration                                          #
+#                                                                                               #
+# WARNING: This configuration removes most safety guards to allow anyone to use the Tasks API,  #
+#          with very high request and concurrency limits. Use ONLY in trusted/lab environments.  #
+#          Do NOT expose this configuration on the public Internet.                              #
+#################################################################################################
+
+server:
+  # Same default listen port as the standard config
+  port: 9919
+  # Leave empty to avoid trusting arbitrary X-Forwarded-For chains
+  trusted_proxies_cidrs: []
+
+scanning:
+  # Keep broad defaults; tune speed knobs if needed
+  interval: 10800
+  port_range: "1-65535"
+  # Allow fine-grained subnet splitting for Task requests
+  max_cidr_size: 32
+  timeout: 3600
+  duration_metrics: true
+  disable_dns_resolution: true
+  udp_scan: false
+  use_syn_scan: true
+  # Performance hints (raise with caution)
+  min_rate: 3000
+  max_rate: 0
+  min_parallelism: 2000
+  max_retries: 3
+  host_timeout: 300
+  scan_delay: 0
+  max_scan_delay: 0
+  initial_rtt_timeout: 0
+  max_rtt_timeout: 0
+  min_rtt_timeout: 0
+  disable_host_discovery: true
+
+# Do not set auth here — when omitted, the API is open (no auth).
+# (If an auth section is present but empty, requests are denied by default.)
+
+policy:
+  # Allow any client IP (IPv4 and IPv6) to call the Tasks API
+  client_allow_cidrs: []
+  # Disable rate limiting (<= 0 means unlimited in the server)
+  rate_limit_rps: 0
+  rate_burst: 0
+  # Allow large fan-in of concurrent task creations
+  max_concurrent: 1000
+  # Raise guardrail to allow very large scans (IPs * ports)
+  series_limit: 100000000
+
+scheduler:
+  # Aggressive worker and queue settings (ensure host resources can handle)
+  worker_count: 16
+  task_queue_size: 50000
+  default_timeout: "30m"
+  # Permit smallest subnet shards for Task requests
+  default_max_cidr_size: 32
+  dedupe_ttl: "15m"
+  task_gc_max: 100000
+  task_gc_max_age: "24h"
+  module_limits:
+    # 0 = unlimited per-module concurrency
+    default: 0
+    tcp_syn_fast: 0
+
+# Module presets remain available for clients that request them explicitly.
+modules:
+  tcp_syn_fast:
+    protocol: tcp
+    use_syn_scan: true
+    min_rate: 3000
+    min_parallelism: 2000
+    max_retries: 3
+    host_timeout: 180
+    disable_host_discovery: true
+  tcp_connect_safe:
+    protocol: tcp
+    ports: "22,80,443"
+    use_syn_scan: false
+    max_retries: 2
+    host_timeout: 120
+
