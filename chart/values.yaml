@@ -3,6 +3,7 @@ fullnameOverride: "openport-exporter"
 # Optional shorter name override
 nameOverride: ""
 
+# The container image to deploy
 image:
   repository: ghcr.io/renatogalera/openport-exporter
   # If empty, the chart's appVersion will be used
@@ -12,7 +13,7 @@ image:
   pullSecrets: []
   # - name: my-regcred
 
-# How many replicas of the exporter
+# Replica count for the Deployment
 replicaCount: 1
 
 # Port the container will LISTEN on (exporter binds to LISTEN_PORT env)
@@ -30,33 +31,41 @@ deploymentLabels: {}
 podAnnotations: {}
 podLabels: {}
 
-# Pod Disruption Budget
+# Pod disruption budget settings
 podDisruptionBudget:
   enabled: false
   minAvailable: 1
   # maxUnavailable: ""
 
+# Kubernetes service account
 serviceAccount:
   create: true
   name: ""
   annotations: {}
   automount: true
 
-# Extra environment variables (simple name/value pairs)
+# Add environment variables that the container should use
 extraEnv: []
-#  - name: EXAMPLE_ENV
-#    value: "someValue"
+# - name: EXAMPLE_ENV
+#   value: "someValue"
 
-# Extra CLI args to pass to the exporter
+# Optional extra args passed to the exporter
 extraArgs: []
-#  - --log.level=info
-#  - --log.format=json
-#  - --metrics.path=/metrics
-#  - --listen.port=9919
-#  - --address=localhost
-#  - --collector.go
-#  - --collector.build_info=false
+# Exporter flags (examples — uncomment as needed):
+# - --log.level=info                 # debug|info|warn|error
+# - --log.format=json                # text|json
+# - --metrics.path=/metrics
+# - --listen.port=9919
+# - --address=localhost
+# - --config.path=/app/config.yaml
+# - --collector.go                   # enable Go runtime metrics
+# - --collector.build_info=false     # disable build_info collector
+# Prober flags (legacy; prefer config.targets/scheduler/modules)
+# - --prober.enable
+# - --prober.allow_cidr=192.168.0.0/16
+# - --prober.client_allow_cidr=10.0.0.0/8
 
+# Resource requests and limits
 resources:
   requests:
     memory: "256Mi"
@@ -65,27 +74,20 @@ resources:
     memory: "512Mi"
     cpu: "500m"
 
+# Node scheduling
 nodeSelector: {}
 tolerations: []
 affinity: {}
 topologySpreadConstraints: []
 priorityClassName: ""
 
-# Pod security context (pod-level)
+# SecurityContext at the Pod level
 podSecurityContext: {}
-  # runAsUser: 1000
-  # runAsGroup: 1000
-  # fsGroup: 2000
-  # seccompProfile:
-  #   type: RuntimeDefault
 
-# Container security context (container-level)
+# Container SecurityContext
 containerSecurityContext: {}
-  # allowPrivilegeEscalation: false
-  # runAsNonRoot: true
-  # capabilities:
-  #   add: ["NET_RAW"]   # Required for SYN scans; remove if use_syn_scan=false
 
+# Readiness and Liveness probes configuration
 readinessProbe:
   enabled: true
   path: "/-/ready"
@@ -102,6 +104,7 @@ livenessProbe:
   timeoutSeconds: 3
   failureThreshold: 3
 
+# Ingress configuration
 ingress:
   enabled: false
   className: ""
@@ -117,6 +120,7 @@ ingress:
   #  - hosts: ["openport.example.com"]
   #    secretName: openport-tls-cert
 
+# Service configuration
 service:
   type: ClusterIP
   port: 9919
@@ -124,6 +128,7 @@ service:
   labels: {}
   # nodePort: 309919   # if type=NodePort
 
+# Prometheus ServiceMonitor configuration
 serviceMonitor:
   enabled: false
   interval: 30s
@@ -135,11 +140,12 @@ serviceMonitor:
   relabelings: []
   metricRelabelings: []
 
+# Additional labels and annotations for the ConfigMap (optional)
 configMap:
   labels: {}
   annotations: {}
 
-# ---- Exporter configuration (rendered as /app/config.yaml) ----
+# Config file data mapped to config.yaml
 config:
   server:
     port: 9919
@@ -240,3 +246,4 @@ config:
       use_syn_scan: false
       max_retries: 2
       host_timeout: 120
+
