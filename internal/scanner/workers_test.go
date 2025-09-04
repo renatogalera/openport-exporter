@@ -15,12 +15,12 @@ import (
 
 // Test that StartWorkers enforces scheduler.module_limits via ModuleLimiter in the worker flow.
 func TestWorkers_ModuleLimitEnforced(t *testing.T) {
-    // Requires creating an nmap.Scanner even though run is stubbed; skip if missing.
-    skipIfNoNmap(t)
+	// Requires creating an nmap.Scanner even though run is stubbed; skip if missing.
+	skipIfNoNmap(t)
 
-    // Stub run to simulate work and track concurrency
-    var mu sync.Mutex
-    var inCS, maxCS int
+	// Stub run to simulate work and track concurrency
+	var mu sync.Mutex
+	var inCS, maxCS int
 	oldRun := runNmapFn
 	runNmapFn = func(ctx context.Context, _ *nmap.Scanner, _ ScanTask, _ *slog.Logger) (*nmap.Run, *[]string, error) {
 		mu.Lock()

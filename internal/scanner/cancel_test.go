@@ -16,12 +16,12 @@ import (
 
 // Validate that cancel() on a running task marks it as cancelled and does not flip to failed.
 func TestWorker_CancelRunningTask(t *testing.T) {
-    // This test requires creating an nmap.Scanner; skip if nmap is unavailable.
-    skipIfNoNmap(t)
+	// This test requires creating an nmap.Scanner; skip if nmap is unavailable.
+	skipIfNoNmap(t)
 
-    // Stub run to block until context is cancelled
-    old := runNmapFn
-    var started int32
+	// Stub run to block until context is cancelled
+	old := runNmapFn
+	var started int32
 	runNmapFn = func(ctx context.Context, _ *nmap.Scanner, _ ScanTask, _ *slog.Logger) (*nmap.Run, *[]string, error) {
 		atomic.StoreInt32(&started, 1)
 		<-ctx.Done()
