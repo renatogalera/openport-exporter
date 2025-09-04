@@ -19,6 +19,29 @@ permissions:
   pull-requests: read
 
 jobs:
+  dockerfile_lint:
+    name: Dockerfile Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Detect Dockerfile changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            dockerfile:
+              - 'Dockerfile'
+              - '.hadolint.yaml'
+      - name: Hadolint
+        if: steps.changes.outputs.dockerfile == 'true'
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: error
+
   lint_test:
     name: Lint + Vet + Vuln + Tests
     runs-on: ubuntu-latest

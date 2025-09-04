@@ -6,7 +6,9 @@ ARG BRANCH=""
 ARG DATE=""
 
 # Install necessary packages including libpcap-dev
-RUN apt-get update && apt-get install -y libpcap-dev
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpcap-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory inside the container
 WORKDIR /app

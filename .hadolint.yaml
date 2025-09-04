@@ -1,0 +1,2 @@
+ignored:
+  - DL3008 # apt-get install should pin versions (not practical here)
