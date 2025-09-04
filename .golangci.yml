@@ -1,0 +1,89 @@
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - revive
+    - errcheck
+    - errorlint
+    - wrapcheck
+    - ineffassign
+    - unparam
+    - unused
+    - gocritic
+    - bodyclose
+    - contextcheck
+    - containedctx
+    - copyloopvar    
+    - promlinter        # Prometheus metric naming/style
+    - sloglint
+  disable:
+    - lll               # prefer formatter 'golines' for long lines
+
+  exclusions:
+    generated: strict
+    warn-unused: true
+    presets:
+      - comments
+      - std-error-handling
+      - common-false-positives
+    rules:
+      - linters: [lll]
+        source: "^//go:generate "
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+          disabled: false
+        - name: redefines-builtin-id
+          disabled: false
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+    gosec:
+      excludes:
+        - G304
+        - G306
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+    - golines
+  settings:
+    gofumpt:
+      extra-rules: true
+      module-path: github.com/renatogalera/openport-exporter
+    goimports:
+      local-prefixes:
+        - github.com/renatogalera/openport-exporter
+    golines:
+      max-len: 120
+      tab-len: 8
+      shorten-comments: true
+      reformat-tags: false
+      chain-split-dots: false
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: true
+  new: false
+
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true
+      colors: true
+  show-stats: true
+
+run:
+  timeout: "0"
+  tests: true
+  allow-parallel-runners: true
+  relative-path-mode: cfg

@@ -1,53 +1,14 @@
 # OpenPort Exporter
 
-*A low-cardinality, abuse-resistant Prometheus exporter that maps **open ports** across IPs/CIDRs using **Nmap**, with an optional **/probe** endpoint for on-demand checks.*
-
-[GitHub: renatogalera/openport-exporter](https://github.com/renatogalera/openport-exporter)
-
----
-
-## Table of Contents
-
-* [Why OpenPort Exporter](#why-openport-exporter)
-* [Architecture](#architecture)
-* [Quick Start](#quick-start)
-
-  * [Binary](#binary)
-  * [Docker](#docker)
-  * [Kubernetes (example)](#kubernetes-example)
-* [Configuration](#configuration)
-
-  * [Config file (`config.yaml`)](#config-file-configyaml)
-  * [Flags & Environment variables](#flags--environment-variables)
-* [HTTP Endpoints](#http-endpoints)
-
-  * [/metrics (exporter metrics)](#metrics-exporter-metrics)
-  * [/probe (optional, Blackbox-style)](#probe-optional-blackboxstyle)
-* [Metrics](#metrics)
-
-  * [Exporter metrics (namespace `openport_`)](#exporter-metrics-namespace-openport_)
-  * [Probe response metrics (ephemeral)](#probe-response-metrics-ephemeral)
-* [Prometheus Scrape Configs](#prometheus-scrape-configs)
-
-  * [Exporter](#exporter)
-  * [/probe job (targets via relabel)](#probe-job-targets-via-relabel)
-* [Security & Hardening](#security--hardening)
-* [Operational Guidance](#operational-guidance)
-
-  * [SLOs & Alerts](#slos--alerts)
-  * [Performance & Tuning](#performance--tuning)
-  * [Troubleshooting](#troubleshooting)
-* [Development](#development)
-* [License](#license)
-
----
+**Prometheus exporter for network‑exposure monitoring.**
+Periodically scans your IPs/CIDRs using **Nmap** and exposes **low‑cardinality** metrics so you can **detect and alert when ports open or close** on critical hosts.
 
 ## Why OpenPort Exporter
 
-* **Safe by default**: `/probe` is **disabled** unless explicitly enabled. Rate limits, concurrency caps, and allow-lists built in.
-* **Cardinality-aware**: background `/metrics` exports **aggregates**, not per-IP/port series. Per-port details are available only from `/probe` on demand.
-* **Correct Prometheus semantics**: no heavy work in `Collect()`, explicit HELP/TYPE, bounded labels, scrape timeout respected.
-* **Operationally boring**: context propagation, deterministic shutdown, guarded goroutines, structured logs (Go `slog`).
+* **Cardinality-aware**: background `/metrics` exports **aggregates** (per target/range/protocol), not per-IP/port series. Optional **background details** can emit bounded per-port series for a strict allowlist.
+* **Live configuration**: **hot‑reload** via **SIGHUP** or **HTTP** without service interruption. Dynamic TTL management and thread‑safe snapshots.
+* **Correct Prometheus semantics**: no heavy work in `Collect()`, clear HELP/TYPE, bounded labels, and scrape timeout honored.
+* **Operationally boring**: context propagation, deterministic shutdown, guarded goroutines, structured logs via Go `slog`.
 
 ---
 
@@ -60,7 +21,13 @@
             |
             v
 +-----------+-------------+       +-----------------------------+
-| Scheduler / Worker Pool |  -->  | Nmap (SYN or connect/UDP)  |
+| ConfigManager (live)    |  <--  | SIGHUP / POST /-/reload     |
+| Thread-safe snapshots   |       +-----------------------------+
++-----------+-------------+
+            |
+            v
++-----------+-------------+       +-----------------------------+
+| Scheduler / Worker Pool |  -->  | Nmap (SYN or connect/UDP)   |
 | (bounded queue & ctx)   |       +-----------------------------+
 +-----------+-------------+
             |
@@ -68,18 +35,18 @@
 +-------------------------+
 | Metrics Store (aggreg.) |
 | openport_* gauges/cntrs |
+| Dynamic TTL sweeper     |
 +-----------+-------------+
             |
             v
-+-------------------------+        +----------------------------+
-| HTTP Server             |        | Optional: /probe handler   |
-| /metrics, /-/healthy    |        | (rate/conc/allow-lists)    |
-| /-/ready                |        +----------------------------+
++-------------------------+  
+| HTTP Server             |
+| /metrics, /-/healthy    |
+| /-/ready, /-/reload     |
 +-------------------------+
 ```
 
-* Background workers periodically scan configured targets and publish **aggregated** metrics.
-* The **/probe** endpoint (optional) runs an on-demand *one-off* scan and returns **probe-scoped** metrics only.
+*Background workers scan configured **targets** at their intervals and publish **aggregated** metrics.*
 
 ---
 
@@ -91,17 +58,17 @@
 # Build
 go build -o openport-exporter ./cmd
 
-# Run with defaults (listens on :9919, reads config.yaml in cwd)
+# Run (listens on :9919; reads ./config.yaml by default)
 ./openport-exporter
 ```
 
-> **Note**
-> TCP **SYN** scan is the default (fast, low connection overhead). It requires `CAP_NET_RAW`. If you set `use_syn_scan: false`, the exporter will use `connect()` scan and requires no special capability (slower/noisier).
+> **Scan mode:** TCP **SYN** is default (fast/low-overhead) and **requires `CAP_NET_RAW`**.
+> Set `use_syn_scan: false` to use `connect()` scans (no capability needed, but slower/noisier).
 
 ### Docker
 
 ```bash
-# Example: allow SYN scan inside container (non-root + CAP_NET_RAW is recommended)
+# Non-root + CAP_NET_RAW recommended for SYN
 docker run --rm -p 9919:9919 \
   --cap-add=NET_RAW \
   -v $PWD/config.yaml:/config.yaml:ro \
@@ -109,324 +76,405 @@ docker run --rm -p 9919:9919 \
   ghcr.io/renatogalera/openport-exporter:latest
 ```
 
----
+### Kubernetes
 
-### Kubernetes (example)
-
-Use chart located at [./chart](./chart/README.md).
+A Helm chart is available in `./chart`. See [`chart/README.md`](./chart/README.md) for `values.yaml` and examples (Service, ServiceMonitor, RBAC, etc.).
 
 ---
 
 ## Configuration
 
-### Config file (`config.yaml`)
+OpenPort Exporter reads a single **YAML** file (default `./config.yaml`).
+All fields and defaults below reflect the codebase.
 
-Below is a concise, **source-of-truth** example. Defaults shown reflect the codebase.
+> **Binding:** The process binds using **`--listen.port`** / **`LISTEN_PORT`**.
+> `server.port` is parsed/validated but **not** used to bind.
+
+### Minimal example
 
 ```yaml
 server:
-  port: 9919       # NOTE: current listener uses flag LISTEN_PORT; this field is reserved.
+  port: 9919
 
 scanning:
-  interval: 10800          # seconds; <600 is rejected and replaced by 10800 (3h)
+  # We'll scan every 3h by default (see defaults below)
   port_range: "1-65535"
-  max_cidr_size: 24        # split CIDRs wider than this (e.g., /16 -> /24 chunks)
-  timeout: 3600            # per-subnet scan timeout (seconds)
-  duration_metrics: false
+  max_cidr_size: 24
   disable_dns_resolution: true
-  udp_scan: false
-  use_syn_scan: true       # default true; requires CAP_NET_RAW if true
+  use_syn_scan: true
 
-  # Bounded worker model
-  rate_limit: 60           # reserved
-  task_queue_size: 100
-  worker_count: 5
+targets:
+  - name: "dmz-ssh"
+    target: "192.168.10.0/24"
+    port_range: "22"
+    protocol: "tcp"
+    interval: "1h"
+```
+
+### Full reference (`config.yaml`)
+
+> **Units**
+> Unless stated otherwise: durations use Go syntax (e.g., `30m`, `4h`), timeouts not in duration format are **seconds**, delays in **milliseconds**.
+
+```yaml
+server:
+  port: 9919                         # validated but NOT used to bind the HTTP server
+  trusted_proxies_cidrs: []          # CIDRs allowed to supply X-Forwarded-For (see Security)
+
+scanning:
+  interval: 10800                    # seconds; <600 -> replaced by 10800 (3h)
+  port_range: "1-65535"              # default ports if target.port_range is empty
+  max_cidr_size: 24                  # split CIDRs broader than this (e.g., /16 -> /24)
+  timeout: 3600                      # seconds; per-subnet scan timeout
+  duration_metrics: false            # when true, emits duration gauge + histogram
+  disable_dns_resolution: true       # nmap -n
+  udp_scan: false                    # force UDP at config level (task-level protocol also supported)
+  use_syn_scan: true                 # true => SYN scan (needs CAP_NET_RAW); false => connect()
+
+  # Bounded worker model (legacy fields; see scheduler.* for queue/worker tuning)
+  rate_limit: 60                     # reserved (not used by current scheduler)
+  task_queue_size: 100               # fallback if scheduler.task_queue_size <= 0
+  worker_count: 5                    # fallback if scheduler.worker_count <= 0
 
   # Nmap tuning (safe defaults)
   min_rate: 1000
-  max_rate: 0              # 0 = unlimited
+  max_rate: 0                        # 0 = unlimited
   min_parallelism: 1000
   max_retries: 6
-  host_timeout: 300
-  scan_delay: 0
-  max_scan_delay: 0
-  initial_rtt_timeout: 0
-  max_rtt_timeout: 0
-  min_rtt_timeout: 0
-  disable_host_discovery: true
+  host_timeout: 300                  # seconds
+  scan_delay: 0                      # milliseconds
+  max_scan_delay: 0                  # milliseconds
+  initial_rtt_timeout: 0             # milliseconds
+  max_rtt_timeout: 0                 # milliseconds
+  min_rtt_timeout: 0                 # milliseconds
+  disable_host_discovery: true       # nmap -Pn
 
-# Background targets (IP or CIDR)
+# Background targets (per-target interval)
+# NOTE: Background targets are OPTIONAL. When omitted, the exporter runs in
+# API-only mode (no background scans) and you can trigger scans via the Tasks API.
+# NOTE: "module" is currently IGNORED for background scans; modules apply to Task API only.
 targets:
-  - 192.168.10.0/24
+  - name: "dmz_ssh"
+    target: "192.168.10.0/24"        # IP or CIDR (IPv4 or IPv6)
+    port_range: "22"                  # comma/ranges (e.g., "80,443,8000-8010")
+    protocol: "tcp"                   # "tcp" | "udp"
+    interval: "1h"                    # per-target interval (next eligible after this)
+    module: ""                        # (ignored by background scheduler in current release)
 
-# Optional /probe runtime policy
-prober:
+# Optional: Background Port Details (allowlisted per-port series with hard cap)
+background_details:
   enabled: false
-  allow_cidrs: []            # targets allow-list (CIDRs)
-  client_allow_cidrs: []     # caller IP allow-list (CIDRs)
-  rate_limit: 1.0            # req/sec
-  burst: 1
-  max_cidr_size: 24
-  max_concurrent: 1
-  default_timeout: "10s"
-  max_ports: 4096
-  max_targets: 32
-  auth_token: ""             # if set: require Authorization: Bearer <token>
-  basic_user: ""             # optional Basic Auth
-  basic_pass: ""
-  modules:                   # optional presets referenced via ?module=name
-    fast_syn:
-      protocol: tcp
-      ports: "22-80"
-      use_syn_scan: true
-      min_rate: 2000
-      min_parallelism: 1000
-      max_retries: 3
-      host_timeout: 180
-      disable_host_discovery: true
+  series_budget: 2000                 # upper bound of concurrently exposed per-port series
+  ttl: "30m"                          # TTL for detailed series without reconfirmation
+  targets:                            # explicit allowlist of what can emit detail-series
+    - alias: "ssh-bastion-primary"    # REQUIRED and unique
+      cidr: "203.0.113.10/32"         # IP or CIDR
+      protocol: "tcp"                 # "tcp" | "udp" | "" (defaults to tcp)
+      ports: ["22"]                   # list of ports or ranges
+    - alias: "cluster-etcd"
+      cidr: "10.1.1.0/29"
+      protocol: "tcp"
+      ports: ["2379","2380"]
+    - alias: "web-servers-dmz"
+      cidr: "198.51.100.0/28"
+      protocol: "tcp"
+      ports: ["80","443","8000-8010"]
+  include_alias: true                 # controls label cardinality for detailed series
+  include_ip: true                    # when false, IP label is empty (collapse by alias)
+
+# Authentication (applies to Tasks API only; /metrics and health are unauthenticated)
+auth:
+  bearer_token: ""                    # if set, require "Authorization: Bearer <token>"
+  basic:
+    username: ""                      # if any basic.* is set, require valid Basic Auth
+    password: ""
+
+# API policy: client allowlist, RPS limiting and concurrency guards (Tasks API only)
+policy:
+  client_allow_cidrs: ["127.0.0.0/8"] # who may call /v1/tasks/* (with XFF trust rules)
+  rate_limit_rps: 2.0                 # global & per-IP token-bucket
+  rate_burst: 2
+  max_concurrent: 2                   # max concurrent handlers for Tasks API
+  series_limit: 250000                # guard: estimated_ips * ports must not exceed this
+
+# Scheduler (background + task fan-out)
+scheduler:
+  worker_count: 5                     # if <=0, fallback to scanning.worker_count
+  task_queue_size: 100                # if <=0, fallback to scanning.task_queue_size
+  default_timeout: "30m"              # default scan timeout for Task API
+  default_max_cidr_size: 24           # default subnet split for Task API
+  dedupe_ttl: "15m"                   # deduplication window for task "dedupe_key"
+  task_gc_max: 10000                  # cap stored finished tasks (GC oldest beyond this)
+  task_gc_max_age: "24h"              # GC finished tasks older than this
+  module_limits:                      # per-module concurrency caps (0 = unlimited)
+    default: 0
+    tcp_syn_fast: 2
+
+# Module presets (applied ONLY when a Task request sets "module": "...").
+# Not applied to background targets in the current release.
+modules:
+  tcp_syn_fast:
+    protocol: tcp                     # optional override
+    ports: "22,80,443,1000-1024"      # optional override
+    use_syn_scan: true
+    min_rate: 2000
+    min_parallelism: 1000
+    max_retries: 3
+    host_timeout: 180
+    scan_delay: 0
+    max_scan_delay: 0
+    initial_rtt_timeout: 0
+    max_rtt_timeout: 0
+    min_rtt_timeout: 0
+    disable_host_discovery: true
 ```
 
-> **Implementation note**
-> The listener actually binds using the **flag/env** `LISTEN_PORT`. `server.port` is validated but not currently used to bind.
+> **Sweeper TTL**
+> Global time‑to‑live for inactive series defaults to **3× scanning interval**.
+> If `background_details.ttl` is set, that value becomes the **effective global TTL**.
+> TTL changes on reload are applied live to the sweeper.
 
-### Flags & Environment variables
+### Flags & environment
 
-All flags have environment overrides (via `viper`). Common ones:
+All flags have env overrides (via `viper`):
 
-| Flag                         | Env                         |       Default | Description                         |
-| ---------------------------- | --------------------------- | ------------: | ----------------------------------- |
-| `--metrics.path`             | `METRICS_PATH`              |    `/metrics` | Metrics endpoint path               |
-| `--listen.port`              | `LISTEN_PORT`               |        `9919` | HTTP listen port                    |
-| `--address`                  | `ADDRESS`                   |   `localhost` | Shown on root page                  |
-| `--config.path`              | `CONFIG_PATH`               | `config.yaml` | YAML config path                    |
-| `--collector.go`             | `ENABLE_GO_COLLECTOR`       |       `false` | Enable Go runtime metrics           |
-| `--collector.build_info`     | `ENABLE_BUILD_INFO`         |        `true` | Build info metric                   |
-| `--prober.enable`            | `ENABLE_PROBER`             |       `false` | Enable `/probe`                     |
-| `--prober.allow_cidr`        | `PROBER_ALLOW_CIDRS`        |          `[]` | Target CIDR allow-list (repeatable) |
-| `--prober.client_allow_cidr` | `PROBER_CLIENT_ALLOW_CIDRS` |          `[]` | Caller CIDR allow-list              |
-| `--prober.rate_limit`        | `PROBER_RATE_LIMIT`         |         `1.0` | Requests/sec                        |
-| `--prober.burst`             | `PROBER_BURST`              |           `1` | Token bucket burst                  |
-| `--prober.max_cidr_size`     | `PROBER_MAX_CIDR_SIZE`      |          `24` | Split cap for target CIDRs          |
-| `--prober.max_concurrent`    | `PROBER_MAX_CONCURRENT`     |           `1` | Concurrent `/probe` limit           |
-| `--prober.default_timeout`   | `PROBER_DEFAULT_TIMEOUT`    |         `10s` | Default per-probe timeout           |
-| `--prober.max_ports`         | `PROBER_MAX_PORTS`          |        `4096` | Safety cap on ports param           |
-| `--prober.max_targets`       | `PROBER_MAX_TARGETS`        |          `32` | Safety cap on targets param         |
-| `--prober.auth_token`        | `PROBER_AUTH_TOKEN`         |          `""` | Bearer token to require             |
-| `--prober.basic_user`        | `PROBER_BASIC_USER`         |          `""` | Basic auth user                     |
-| `--prober.basic_pass`        | `PROBER_BASIC_PASS`         |          `""` | Basic auth pass                     |
-| `--log.level`                | `LOG_LEVEL`                 |        `info` | `debug`/`info`/`warn`/`error`       |
-| `--log.format`               | `LOG_FORMAT`                |        `json` | `json` or `text`                    |
+| Flag                     | Env                   | Default       | Description                   |
+| ------------------------ | --------------------- | ------------- | ----------------------------- |
+| `--metrics.path`         | `METRICS_PATH`        | `/metrics`    | Metrics endpoint path         |
+| `--listen.port`          | `LISTEN_PORT`         | `9919`        | HTTP listen port              |
+| `--address`              | `ADDRESS`             | `localhost`   | Shown on the root page        |
+| `--config.path`          | `CONFIG_PATH`         | `config.yaml` | YAML config path              |
+| `--collector.go`         | `ENABLE_GO_COLLECTOR` | `false`       | Enable Go runtime metrics     |
+| `--collector.build_info` | `ENABLE_BUILD_INFO`   | `true`        | Expose Prometheus build\_info |
+| `--log.level`            | `LOG_LEVEL`           | `info`        | `debug`/`info`/`warn`/`error` |
+| `--log.format`           | `LOG_FORMAT`          | `json`        | `json` or `text`              |
+
+---
+
+## Hot Configuration Reload
+
+OpenPort Exporter supports **live reload** with **zero downtime**:
+
+* **SIGHUP**: reloads from the original `config.path`.
+* **HTTP**: `POST /-/reload` (allowed **only from loopback**).
+* **Active scans continue**; new config is used for subsequent scan cycles and API requests.
+* **Dynamic TTL**: sweeper TTL is recalculated if relevant settings change.
+
+```bash
+# Reload via signal (Unix)
+kill -SIGHUP $(pgrep openport-exporter)
+
+# Reload via HTTP (loopback only)
+curl -X POST http://localhost:9919/-/reload
+```
+
+**Reloaded live:**
+
+* Target list (`targets`)
+* Per-target intervals and most scanning tunables
+* `background_details` (allowlist, include flags, TTL → also updates sweeper)
+* `policy.*` and `server.trusted_proxies_cidrs` (affects Tasks API guards)
+* `scheduler.module_limits` and API concurrency/limits
+
+**Requires restart:**
+
+* HTTP listen port / TLS / network bindings
+* Log level/format (applied at start)
+* Enabling Go/build collectors via flags
+* Scheduler worker pool size (`scheduler.worker_count`)
+* Queue buffer size (`scheduler.task_queue_size`)
+
+> The worker pool and queue are created at startup. Changing them safely at runtime would require a dynamic supervisor and is planned for a future release.
+
+**Background details validity rules:**
+
+* Aliases must be unique.
+* Each item must declare a valid IP/CIDR and a valid port list/ranges.
+* Invalid rules cause reload to **fail** with a clear error; the previous config remains active.
 
 ---
 
 ## HTTP Endpoints
 
-### `/metrics` (exporter metrics)
+### Health & Admin
 
-* Fast, constant-time; **no I/O** on request path.
-* Includes:
+* `GET /-/healthy` → `200 OK`
+* `GET /-/ready` → `503` until ready (≈200ms after start), then `200 OK`
+* `POST /-/reload` → reloads configuration; **accepted only from loopback** (not proxied)
 
-  * Background scan metrics (`openport_*`)
-  * Build/go collectors (if enabled)
-  * **Admin probe handler metrics**: `openport_probe_requests_total`, `openport_probe_inflight`, `openport_probe_handler_seconds`
+### Metrics
 
-Health endpoints:
+* `GET /metrics` (path configurable via `--metrics.path`)
+* Fast and constant‑time; **no I/O** happens in the request path.
+* Exposes exporter metrics and (optionally) `go_*` and `build_info` collectors.
 
-* `/-/healthy` → `200 OK`
-* `/-/ready`   → `200 OK` (ready as soon as server is up)
+### Tasks API (background scans on demand)
 
-### `/probe` (optional, Blackbox-style)
+**All Tasks API endpoints enforce policy/auth:**
 
-Disabled by default. When enabled:
+* **Auth**: `auth.bearer_token` and/or `auth.basic` (either passes).
+* **Client allowlist**: `policy.client_allow_cidrs` (uses `X-Forwarded-For` **only** if the direct client is loopback/unspecified or in `server.trusted_proxies_cidrs`).
+* **Rate limit**: `policy.rate_limit_rps`/`rate_burst` (global + per‑IP).
+* **Max concurrent**: `policy.max_concurrent`.
 
-**Query params**
+Endpoints:
 
-* `target` (required): comma/space-separated list of IPs or CIDRs
-* `ports` (required): `22,80,443` or `1000-1024`
-* `protocol` (optional): `tcp` (default) or `udp`
-* `timeout` (optional): e.g., `5s` (will be clamped by request header & server policy)
-* `details` (optional): `1` to include per-(ip,port,proto) gauges in the response
-  *Guard*: request is **rejected** if `estimatedIPs * ports > 5000` series.
-* `max_cidr_size` (optional): tighten split fan-out for the request
-* `module` (optional): apply a preset from `prober.modules`
+* `POST /v1/tasks/scan`
+  Enqueue fan‑out scans. **Request**:
 
-**Security & abuse resistance**
+  ```json
+  {
+    "targets": ["10.0.0.0/24", "10.0.1.10"],
+    "ports": "22,80,443",
+    "protocol": "tcp",              // default "tcp"
+    "module": "tcp_syn_fast",       // optional; applies module preset
+    "max_cidr_size": 24,            // optional override (split)
+    "timeout": "30m",               // optional per-task duration
+    "dedupe_key": "optional-key",   // dedupe window: scheduler.dedupe_ttl
+    "priority": "high|normal|low",  // default "normal"
+    "retries": 0                    // optional retry attempts with backoff
+  }
+  ```
+  **Response**: `200 OK`
 
-* **Caller allow-list** (`--prober.client_allow_cidr`); deny by default if set.
-* **Target allow-list** (`--prober.allow_cidr`); deny by default if set.
-* **Rate limiting** (`rate_limit` + `burst`)
-* **Concurrency cap** (`max_concurrent`)
-* **Auth**: either **Bearer** (`Authorization: Bearer …`) or **Basic** (`user/pass`) may be configured.
+  ```json
+  {"task_id":"<id>","accepted":true}
+  ```
 
-**Scrape-timeout honoring**
+  Guards & errors:
 
-* The handler reads `X-Prometheus-Scrape-Timeout-Seconds` and **shrinks** internal deadline by a safety margin.
+  * **Series guard**: estimate `ips * ports` ≤ `policy.series_limit` → else **400**.
+  * **Backpressure**: queue full (including pending priority queue) → **429**.
+  * **Rate limit**: exceeded → **429**.
+  * **Auth/allowlist**: **401/403**.
+  * **Bad input**: **400** (invalid ports/targets, etc).
 
-> `/probe` returns a **separate, per-request registry**, so probe metrics do not pollute exporter series.
+* `GET /v1/tasks/{id}` → task record (state/summary/timestamps).
+
+* `POST /v1/tasks/{id}/cancel` → best‑effort cancel; `200` on success, `400` otherwise.
+
+* `GET /v1/tasks?state=pending|running|done&limit=N` → compact listing.
+
+**Notes**
+
+* **Deduplication**: same `dedupe_key` inside the TTL returns the **same `task_id`** with `"accepted": false`.
+* **Module limits**: per‑module concurrency caps (`scheduler.module_limits`) are enforced across workers.
+* **Module presets** are applied **only** when the task sets `"module": "<name>"`.
 
 ---
 
-## Metrics
+## Metrics Reference
+
+All metric names below are **exactly** as exported by the current code.
 
 ### Exporter metrics (namespace `openport_`)
 
-| Metric                                  | Type      | Labels                                   | Description                                                               |
-| --------------------------------------- | --------- | ---------------------------------------- | ------------------------------------------------------------------------- |
-| `openport_scan_target_ports_open_total` | Gauge     | `target,port_range,protocol`             | Open (ip,port,proto) count **in last scan** for that target/range/proto   |
-| `openport_last_scan_duration_seconds`   | Gauge     | `target,port_range,protocol`             | Duration of last scan (seconds)                                           |
-| `openport_scan_duration_seconds`        | Histogram | `target,port_range,protocol`             | Distribution of scan durations                                            |
-| `openport_task_queue_size`              | Gauge     | *none*                                   | Current task queue size                                                   |
-| `openport_nmap_scan_timeouts_total`     | Counter   | `target,port_range,protocol`             | Nmap scans that timed out                                                 |
-| `openport_nmap_host_up_count`           | Gauge     | `target`                                 | Hosts up in last scan (target scope)                                      |
-| `openport_nmap_host_down_count`         | Gauge     | `target`                                 | Hosts down in last scan                                                   |
-| `openport_scans_successful_total`       | Counter   | `target,port_range,protocol`             | Completed without error                                                   |
-| `openport_scans_failed_total`           | Counter   | `target,port_range,protocol,error_type`  | Failed scans broken down by `error_type` (`timeout`,`permission`,`other`) |
-| `openport_last_scan_timestamp_seconds`  | Gauge     | `target,port_range,protocol`             | Unix ts of last scan                                                      |
-| `openport_port_state_changes_total`     | Counter   | `target,port_range,protocol,change_type` | `closed_to_open` / `open_to_closed`                                       |
+| Metric                                  | Type      | Labels                                   | Description                                                                       |
+| --------------------------------------- | --------- | ---------------------------------------- | --------------------------------------------------------------------------------- |
+| `openport_scan_target_ports_open`       | Gauge     | `target,port_range,protocol`             | Count of `(ip,port,proto)` observed **open** in the last scan for that key.       |
+| `openport_last_scan_duration_seconds`   | Gauge     | `target,port_range,protocol`             | Duration of the last scan (seconds).                                              |
+| `openport_scan_duration_seconds`        | Histogram | `target,port_range,protocol`             | Distribution of scan durations (enabled when `duration_metrics: true`).           |
+| `openport_nmap_scan_timeouts_total`     | Counter   | `target,port_range,protocol`             | Nmap scans that timed out.                                                        |
+| `openport_nmap_hosts_up`                | Gauge     | `target,port_range,protocol`             | Hosts up in last scan.                                                            |
+| `openport_nmap_hosts_down`              | Gauge     | `target,port_range,protocol`             | Hosts down in last scan.                                                          |
+| `openport_scans_successful_total`       | Counter   | `target,port_range,protocol`             | Scans completed without error.                                                    |
+| `openport_scans_failed_total`           | Counter   | `target,port_range,protocol,error_type`  | Failed scans by `error_type` (`timeout`,`permission`,`other`,`scanner_creation`). |
+| `openport_last_scan_timestamp_seconds`  | Gauge     | `target,port_range,protocol`             | Unix timestamp of last successful scan.                                           |
+| `openport_port_state_changes_total`     | Counter   | `target,port_range,protocol,change_type` | `closed_to_open` / `open_to_closed`.                                              |
+| `openport_port_open`                    | Gauge     | `alias,ip,port,protocol`                 | Background details: 1 if `(alias/ip,port,proto)` is open.                         |
+| `openport_details_series_dropped_total` | Counter   | —                                        | Background details: series dropped due to `series_budget`.                        |
 
-**Probe handler admin metrics** (also on `/metrics`):
+### Scheduler / Tasks metrics
 
-* `openport_probe_requests_total{outcome=…}` with outcomes like `ok`, `bad_request`, `unauthorized`, `target_denied`, `rate_limited`, `concurrency`, `series_limit`, `large_fanout`, `error`
-* `openport_probe_inflight` (gauge)
-* `openport_probe_handler_seconds` (histogram)
+| Metric                                      | Type      | Labels           | Description                                       |
+| ------------------------------------------- | --------- | ---------------- | ------------------------------------------------- |
+| `openport_scheduler_queue_size`             | Gauge     | —                | Current scheduler queue size (pending + fan‑out). |
+| `openport_scheduler_running`                | Gauge     | —                | Number of running tasks.                          |
+| `openport_scheduler_oldest_pending_seconds` | Gauge     | —                | Age of the oldest pending task.                   |
+| `openport_tasks_created_total`              | Counter   | `module`         | Tasks accepted for execution.                     |
+| `openport_tasks_completed_total`            | Counter   | `module,outcome` | Tasks completed (\`outcome=success, error\`)      |
+| `openport_task_duration_seconds`            | Histogram | `module`         | Runtime of tasks.                                 |
+| `openport_scheduler_enqueue_failed_total`   | Counter   | —                | Failed enqueues due to backpressure.              |
 
-### Probe response metrics (ephemeral)
+### HTTP API metrics
 
-These appear **only** in the `/probe` HTTP response:
+| Metric                        | Type    | Labels `route,method,code` | Description                      |
+| ----------------------------- | ------- | -------------------------- | -------------------------------- |
+| `openport_api_requests_total` | Counter | route, method, HTTP code   | Requests to admin/API endpoints. |
 
-| Metric                                | Type  | Labels             | Notes                                              |
-| ------------------------------------- | ----- | ------------------ | -------------------------------------------------- |
-| `probe_success`                       | Gauge | *none*             | 1 on success, 0 on error                           |
-| `probe_duration_seconds`              | Gauge | *none*             | Average per-target duration within the request     |
-| `probe_open_ports_total`              | Gauge | *none*             | Count of open (ip,port,proto) tuples found         |
-| `probe_hosts_up` / `probe_hosts_down` | Gauge | *none*             | Host reachability per request                      |
-| `probe_port_open`                     | Gauge | `ip,port,protocol` | Only when `details=1` and series limit checks pass |
+> **Tip (alerts):**
+>
+> * Exporter down: `up{job="openport_exporter"} == 0`
+> * Backpressure: `increase(openport_scheduler_enqueue_failed_total[5m]) > 0`
+> * p95 slow scans: `histogram_quantile(0.95, sum(rate(openport_scan_duration_seconds_bucket[10m])) by (le)) > 60`
+> * Exposure changed: `increase(openport_port_state_changes_total[15m]) > 0`
+> * Critical port closed (with background details): `openport_port_open{alias="ssh-bastion-primary",port="22"} == 0`
 
 ---
 
-## Prometheus Scrape Configs
+## Prometheus Integration
 
-### Exporter
+### Scrape config
 
 ```yaml
 scrape_configs:
   - job_name: 'openport_exporter'
+    metrics_path: /metrics
     static_configs:
       - targets: ['openport-exporter:9919']
-    metrics_path: /metrics
 ```
 
-### `/probe` job (targets via relabel)
-
-The `/probe` endpoint is a **prober**: it returns metrics scoped to the request, not exporter state.
-
-**TCP reachability on selected ports**
-
-```yaml
-scrape_configs:
-  - job_name: 'openport_probe_tcp'
-    metrics_path: /probe
-    static_configs:
-      - targets:
-          - "10.0.0.0/24"
-          - "10.0.1.10"
-    params:
-      ports: ["22,80,443"]
-      protocol: ["tcp"]
-      timeout: ["10s"]
-      details: ["0"]
-    relabel_configs:
-      # Pass original target as ?target=
-      - source_labels: [__address__]
-        target_label: __param_target
-      # Route scrape to exporter
-      - target_label: __address__
-        replacement: openport-exporter:9919
-    # Optional: add bearer token header
-    authorization:
-      type: Bearer
-      credentials: YOUR_TOKEN
-```
-
-**UDP example**
-
-```yaml
-  - job_name: 'openport_probe_udp53'
-    metrics_path: /probe
-    static_configs:
-      - targets: ["10.0.2.0/24"]
-    params:
-      ports: ["53"]
-      protocol: ["udp"]
-      timeout: ["5s"]
-```
-
-> Keep `/probe` QPS low and ensure allow-lists & auth are configured.
+> For Kubernetes, prefer a Service + ServiceMonitor and keep the exporter behind a NetworkPolicy that restricts egress to intended CIDRs.
 
 ---
 
 ## Security & Hardening
 
-* **Principle of least privilege**
+* **Least privilege**
 
-  * SYN scan (`use_syn_scan: true`) requires `CAP_NET_RAW`. Run container **as non-root** with only `NET_RAW`.
-  * If `use_syn_scan: false`, no capability is needed (slower `connect()` scan).
+  * SYN scans (`use_syn_scan: true`) require `CAP_NET_RAW`. Run the container **as non‑root** with **only** `NET_RAW`.
+  * With `use_syn_scan: false`, no special capability is needed.
 * **Network policy**
 
-  * Use **egress** policies to limit scan destinations to intended CIDRs.
-* **/probe abuse resistance**
-
-  * Enable **client & target allow-lists**, **rate limiting**, and **concurrency caps**.
-  * Requests with `details=1` are rejected if they would exceed **5k** time series.
+  * Enforce **egress** policies limiting scan destinations to the intended CIDRs.
 * **Transport**
 
-  * Place behind a TLS-terminating reverse proxy if exposed.
-  * Avoid HTTP/2 cleartext exposure on the internet.
-* **Secrets hygiene**
+  * Expose behind TLS‑terminating ingress/proxy as needed.
+* **Auth**
 
-  * No secrets in metrics or logs; avoid logging full targets when sensitive.
-  * Prefer **Bearer** over Basic; if using Basic, rotate credentials.
+  * Tasks API supports **Bearer** and/or **Basic**. Prefer **Bearer**.
+* **Trusted proxies & client allowlist**
+
+  * Set `server.trusted_proxies_cidrs` to the networks of proxies allowed to supply `X-Forwarded-For`.
+  * The exporter **only** trusts `X‑Forwarded‑For` if the direct client is **loopback/unspecified** or **within** `trusted_proxies_cidrs`.
+  * Apply `policy.client_allow_cidrs` to restrict who can reach the Tasks API.
+* **Rate limiting**
+
+  * `policy.rate_limit_rps` + `rate_burst` apply globally and per‑IP to the Tasks API.
+* **Task retention (GC)**
+
+  * Control with `scheduler.task_gc_max` and `scheduler.task_gc_max_age`. Runs every 5 minutes.
 * **Supply chain**
 
-  * Pin dependencies and run `govulncheck`, `staticcheck`, `gosec` in CI.
+  * Pin dependencies; run `govulncheck`, `staticcheck`, `gosec` in CI.
 
 ---
 
 ## Operational Guidance
 
-### SLOs & Alerts
+### Performance tips
 
-* **Availability**: `/metrics` served within scrape timeout.
-* **Latency**: `openport_probe_handler_seconds` p95 < **1s** (tune per environment).
-* **Backpressure**: `openport_task_queue_size` steady-state near **0**.
-
-**Alert suggestions**
-
-```promql
-# Exporter unhealthy (scrapes failing)
-up{job="openport_exporter"} == 0
-
-# Probe handler saturation
-sum(rate(openport_probe_requests_total{outcome=~"rate_limited|concurrency"}[5m])) > 0
-
-# Scan runtime anomalies (p95 increase)
-histogram_quantile(0.95, sum(rate(openport_scan_duration_seconds_bucket[10m])) by (le)) > 60
-
-# Exposure changed abruptly
-increase(openport_port_state_changes_total[15m]) > 0
-```
-
-### Performance & Tuning
-
-* Start with defaults. Increase `min_rate`/`min_parallelism` gradually; cap with `max_rate`.
-* Keep `worker_count` modest; this exporter is I/O bound by Nmap.
-* Consider `disable_host_discovery: true` (equivalent to `-Pn`) **only** when you’re confident hosts are up.
+* Start with defaults. Increase `min_rate` / `min_parallelism` gradually; cap with `max_rate`.
+* Keep background `worker_count` modest; Nmap dominates I/O.
+* `disable_host_discovery: true` (like `-Pn`) speeds scans when you’re confident hosts are up.
+* Prefer narrower `port_range` for large CIDRs.
 
 ### Troubleshooting
 
-* **Permission errors** with SYN scan → ensure `CAP_NET_RAW`.
-* **Slow scans** → reduce port ranges; tune `min_rate`, `max_retries`, `host_timeout`.
-* **Probe rejections** → check `allow_cidrs`, `client_allow_cidrs`, and series limits (details=1).
+* **Permission errors** with SYN → grant `CAP_NET_RAW` (or use `connect()` scans).
+* **Slow scans** → narrow port ranges; tune `min_rate`, `max_retries`, `host_timeout`.
+* **Config reload failed** → check file permissions/YAML; invalid configs are rejected and the current config remains active.
+* **“Queue full” (429)** → increase `scheduler.task_queue_size`, reduce fan‑out (`max_cidr_size`), or provision more workers; for API, consider priorities and `max_concurrent`.
 
 ---
 
@@ -440,11 +488,8 @@ go build ./...
 # Tests (race + coverage)
 go test -race -v ./...
 
-# Static analysis (examples)
-golangci-lint run
-govulncheck ./...
-staticcheck ./...
-gosec ./...
+# Formatting
+go fmt ./...
 ```
 
 ---

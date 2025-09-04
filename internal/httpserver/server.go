@@ -1,54 +1,54 @@
 package httpserver
 
 import (
-	"context"
+	"encoding/json"
+	"fmt"
 	"html/template"
-	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/prometheus/client_golang/prometheus"
 	promcollectors "github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"golang.org/x/time/rate"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/renatogalera/openport-exporter/internal/collectors"
 	cfgpkg "github.com/renatogalera/openport-exporter/internal/config"
+	openmetrics "github.com/renatogalera/openport-exporter/internal/metrics"
+	prioq "github.com/renatogalera/openport-exporter/internal/priority"
 	"github.com/renatogalera/openport-exporter/internal/scanner"
+	taskspkg "github.com/renatogalera/openport-exporter/internal/tasks"
 )
 
-// Simple landing page with a working repo link and example /probe query.
 const rootTemplate = `<html>
  <head><title>OpenPort Exporter</title></head>
  <body>
    <h1>OpenPort Exporter</h1>
    <p>Metrics at: <a href='{{ .MetricsPath }}'>{{ .MetricsPath }}</a></p>
    <p>Source: <a href='https://github.com/renatogalera/openport-exporter'>github.com/renatogalera/openport-exporter</a></p>
-   <p>Probe endpoint: <code>/probe?target=10.0.0.1,10.0.0.2/31&amp;ports=22,80,443,1000-1024&amp;module=tcp_fast&amp;protocol=tcp&amp;details=1</code></p>
+   <!-- /probe endpoint intentionally not supported -->
  </body>
  </html>`
 
-// Ports syntax: "80,443,1000-1024"
 var portsRe = regexp.MustCompile(`^(?:\d{1,5}(?:-\d{1,5})?)(?:\s*,\s*(?:\d{1,5}(?:-\d{1,5})?))*$`)
 
-// NewServer wires the custom registry and handlers.
-//
-// Security/perf hardening in this version:
-//  - Correct promhttp usage (no bogus HandlerOpts fields).
-//  - Add MaxRequestsInFlight/Timeout to metrics handler for backpressure.
-//  - Optional /probe auth accepts either Bearer OR Basic when both configured.
-//  - Optional use of X-Forwarded-For only when coming from loopback.
-//  - Soft readiness gating via an internal flag setter (exported via SetReady).
-func NewServer(e *collectors.Exporter, s *collectors.Settings, cfg *cfgpkg.Config) *http.Server {
+// NewServer wires the custom registry and handlers. Uses ConfigManager for safe live reads.
+func NewServer(
+	e *collectors.Exporter,
+	s *collectors.Settings,
+	mgr *cfgpkg.Manager,
+	tm *taskspkg.Manager,
+	workerQueue chan scanner.ScanTask,
+	mc *openmetrics.Collector,
+	prio *prioq.Queue,
+) *http.Server {
 	t := template.Must(template.New("root").Parse(rootTemplate))
 
-	// Custom registry for exporter metrics.
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(e)
 	if s.EnableBuildInfo {
@@ -58,36 +58,41 @@ func NewServer(e *collectors.Exporter, s *collectors.Settings, cfg *cfgpkg.Confi
 		reg.MustRegister(promcollectors.NewGoCollector())
 	}
 
-	// Local metrics for /probe guardrails and handler latencies.
-	proberRequests := prometheus.NewCounterVec(
-		prometheus.CounterOpts{Name: "openport_probe_requests_total", Help: "Number of /probe requests by outcome."},
-		[]string{"outcome"},
-	)
-	proberInflight := prometheus.NewGauge(
-		prometheus.GaugeOpts{Name: "openport_probe_inflight", Help: "Current in-flight /probe requests."},
-	)
-	proberHandlerSeconds := prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "openport_probe_handler_seconds",
-			Help:    "End-to-end handler latency for /probe.",
-			Buckets: prometheus.DefBuckets,
+	// API requests metrics
+	apiReq := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "openport",
+			Name:      "api_requests_total",
+			Help:      "API requests by route, method, code.",
 		},
+		[]string{"route", "method", "code"},
 	)
-	reg.MustRegister(proberRequests, proberInflight, proberHandlerSeconds)
+	reg.MustRegister(apiReq)
 
-	// Backpressure on /metrics gather.
 	promHandler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{
-		// Rejects further scrapes if many concurrent gathers occur.
 		MaxRequestsInFlight: 8,
-		// Prevents long-hanging gathers in pathological cases.
-		Timeout: 30 * time.Second,
+		Timeout:             30 * time.Second,
 	})
 
 	mux := http.NewServeMux()
+	// Read initial config and build rate guards / trusted proxies
+	cfg0 := mgr.Get()
+	var guards *RateGuards
+	if cfg0.Policy != nil && cfg0.Policy.RateLimitRPS > 0 {
+		guards = NewRateGuards(cfg0.Policy.RateLimitRPS, cfg0.Policy.RateBurst, 10*time.Minute, true)
+	}
+	var trustedProxies []*net.IPNet
+	if len(cfg0.Server.TrustedProxiesCIDRs) > 0 {
+		for _, c := range cfg0.Server.TrustedProxiesCIDRs {
+			if _, nw, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil && nw != nil {
+				trustedProxies = append(trustedProxies, nw)
+			}
+		}
+	}
 
-	// Readiness/health. Keep health as always OK; make readiness meaningful.
-	readyCh := make(chan struct{}, 1) // closed when the app is ready.
+	readyCh := make(chan struct{}, 1)
 	isReady := false
+
 	mux.HandleFunc("/-/healthy", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -106,33 +111,267 @@ func NewServer(e *collectors.Exporter, s *collectors.Settings, cfg *cfgpkg.Confi
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Main handlers
+	// metrics
 	mux.Handle(s.MetricsPath, promHandler)
+
+	// root
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if err := t.Execute(w, s); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
 
-	// Optional /probe
-	if s.EnableProber {
-		setupProbeHandler(mux, s, cfg, e.Logger, proberRequests, proberInflight, proberHandlerSeconds)
-	}
+	// hot reload (POST /-/reload)
+	mux.HandleFunc("/-/reload", instrument(apiReq, "/-/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// restrict to loopback for safety
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if err := mgr.Reload(); err != nil {
+			http.Error(w, fmt.Sprintf("failed to reload config: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	}))
 
-	// HTTP server with tight-ish timeouts. No h2c; HTTP/2 only via TLS offload if any.
+	// Tasks API (authenticated + guarded)
+	// Concurrency guard for task creation (hot-reloadable via atomic pointer)
+	maxConc := 2
+	if cfg0.Policy != nil && cfg0.Policy.MaxConcurrent > 0 {
+		maxConc = cfg0.Policy.MaxConcurrent
+	}
+	var apiSem atomic.Value // *semaphore.Weighted
+	apiSem.Store(semaphore.NewWeighted(int64(maxConc)))
+	// Build policy guards from current config snapshot (will be reloaded on /-/reload call paths via mgr)
+	// Note: we read cfg live inside handlers to always use latest policy/auth.
+
+	// POST /v1/tasks/scan
+	mux.HandleFunc(
+		"/v1/tasks/scan",
+		instrument(apiReq, "/v1/tasks/scan", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			cfg := mgr.Get()
+			// Auth (Bearer or Basic)
+			if !checkAuth(r, cfg.Auth) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			// Client allow-list + rate limit
+			if !allowClientWithProxies(r, cfg.Policy, trustedProxies) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if guards != nil && !guards.Allow(r) {
+				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+				return
+			}
+			// concurrency
+			sem := apiSem.Load().(*semaphore.Weighted)
+			if err := sem.Acquire(r.Context(), 1); err != nil {
+				http.Error(w, "request cancelled", http.StatusRequestTimeout)
+				return
+			}
+			defer sem.Release(1)
+			// Decode request
+			var req struct {
+				Targets     []string `json:"targets"`
+				Ports       string   `json:"ports"`
+				Protocol    string   `json:"protocol"`
+				Module      string   `json:"module"`
+				MaxCIDRSize int      `json:"max_cidr_size"`
+				Timeout     string   `json:"timeout"`
+				DedupeKey   string   `json:"dedupe_key"`
+				Priority    string   `json:"priority"`
+				Retries     int      `json:"retries"`
+			}
+			if !decodeJSON(w, r, &req, 1<<20) {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(req.Targets) == 0 || strings.TrimSpace(req.Ports) == "" {
+				http.Error(w, "targets and ports are required", http.StatusBadRequest)
+				return
+			}
+			proto := strings.ToLower(strings.TrimSpace(req.Protocol))
+			if proto == "" {
+				proto = "tcp"
+			}
+			if !portsRe.MatchString(req.Ports) {
+				http.Error(w, "invalid ports syntax", http.StatusBadRequest)
+				return
+			}
+			// Series guard
+			ipCount := estimateIPCount(req.Targets)
+			portCount, ok := estimatePortCount(req.Ports)
+			if !ok || portCount <= 0 {
+				http.Error(w, "invalid ports", http.StatusBadRequest)
+				return
+			}
+			if cfg.Policy != nil && cfg.Policy.SeriesLimit > 0 {
+				if ipCount*portCount > cfg.Policy.SeriesLimit {
+					http.Error(w, "series limit exceeded", http.StatusBadRequest)
+					return
+				}
+			}
+			// Fanout and backpressure
+			maxCIDR := cfg.Scheduler.DefaultMaxCIDRSize
+			if req.MaxCIDRSize > 0 {
+				maxCIDR = req.MaxCIDRSize
+			}
+			subScans := estimateSubScanFanout(req.Targets, maxCIDR)
+			if subScans <= 0 {
+				http.Error(w, "no work to enqueue", http.StatusBadRequest)
+				return
+			}
+			pending := 0
+			if prio != nil {
+				pending = prio.Pending()
+			}
+			if cap(workerQueue)-(len(workerQueue)+pending) < subScans {
+				http.Error(w, "queue full", http.StatusTooManyRequests)
+				return
+			}
+			// Create task record (dedupe respected)
+			rec, created := tm.Create(subScans, strings.TrimSpace(req.DedupeKey))
+			accepted := created
+			// Compute timeout override
+			timeoutSec := 0
+			if strings.TrimSpace(req.Timeout) != "" {
+				if d, err := time.ParseDuration(req.Timeout); err == nil && d > 0 {
+					timeoutSec = int(d.Seconds())
+				}
+			}
+			// Enqueue subtasks
+			for _, tgt := range req.Targets {
+				subs, err := scanner.SplitIntoSubnets(tgt, maxCIDR)
+				if err != nil {
+					continue
+				}
+				for _, sub := range subs {
+					st := scanner.ScanTask{
+						Target:                 sub,
+						PortRange:              req.Ports,
+						Protocol:               proto,
+						TaskID:                 rec.ID,
+						Module:                 req.Module,
+						MaxCIDRSizeOverride:    maxCIDR,
+						TimeoutOverrideSeconds: timeoutSec,
+						MaxAttempts:            req.Retries,
+					}
+					ok := false
+					if prio != nil {
+						p := strings.ToLower(strings.TrimSpace(req.Priority))
+						ok = prio.Enqueue(p, st)
+					} else {
+						select {
+						case workerQueue <- st:
+							ok = true
+						default:
+							ok = false
+						}
+					}
+					if !ok {
+						http.Error(w, "queue full", http.StatusTooManyRequests)
+						return
+					}
+				}
+			}
+			mc.UpdateTaskQueueSize(len(workerQueue) + pending)
+			mc.IncTasksCreated(nonEmpty(req.Module, "default"))
+			mc.SetOldestPendingAge(tm.OldestPendingAge())
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"task_id": rec.ID, "accepted": accepted})
+		}),
+	)
+
+	// GET /v1/tasks/{id} and POST /v1/tasks/{id}/cancel
+	mux.HandleFunc("/v1/tasks/", instrument(apiReq, "/v1/tasks/*", func(w http.ResponseWriter, r *http.Request) {
+		cfg := mgr.Get()
+		if !checkAuth(r, cfg.Auth) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !allowClientWithProxies(r, cfg.Policy, trustedProxies) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) < 3 || parts[0] != "v1" || parts[1] != "tasks" {
+			http.NotFound(w, r)
+			return
+		}
+		id := parts[2]
+		if r.Method == http.MethodGet && len(parts) == 3 {
+			rec := tm.Get(id)
+			if rec == nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(rec)
+			return
+		}
+		if r.Method == http.MethodPost && len(parts) == 4 && parts[3] == "cancel" {
+			ok := tm.Cancel(id)
+			if !ok {
+				http.Error(w, "cannot cancel", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+
+	// GET /v1/tasks?state=...&limit=N
+	mux.HandleFunc("/v1/tasks", instrument(apiReq, "/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		cfg := mgr.Get()
+		if !checkAuth(r, cfg.Auth) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !allowClientWithProxies(r, cfg.Policy, trustedProxies) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		q := r.URL.Query()
+		st := strings.TrimSpace(q.Get("state"))
+		lim := 0
+		if v := strings.TrimSpace(q.Get("limit")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				lim = n
+			}
+		}
+		list := tm.List(st, lim)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(list)
+	}))
+
 	srv := &http.Server{
 		Addr:              ":" + s.ListenPort,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		WriteTimeout:      2 * time.Minute,
-		// BaseContext ensures children inherit server lifetime if desired.
 	}
 
-	// Flip readiness after server starts accepting (best-effort).
+	// flip readiness
 	go func() {
-		// In practice you could trigger this from cmd/run after workers start.
-		// We mark ready shortly after startup to avoid regressions; customize as needed.
 		time.Sleep(200 * time.Millisecond)
 		select {
 		case readyCh <- struct{}{}:
@@ -140,530 +379,123 @@ func NewServer(e *collectors.Exporter, s *collectors.Settings, cfg *cfgpkg.Confi
 		}
 	}()
 
+	// Allow components to react to reload: rebuild guards, proxies and concurrency semaphore
+	mgr.AddOnReload(func(old, newCfg *cfgpkg.Config) {
+		// Rebuild guards
+		if newCfg.Policy != nil && newCfg.Policy.RateLimitRPS > 0 {
+			guards = NewRateGuards(
+				newCfg.Policy.RateLimitRPS,
+				newCfg.Policy.RateBurst,
+				10*time.Minute,
+				true,
+			)
+		} else {
+			guards = nil
+		}
+		// Recompute trusted proxies
+		trustedProxies = nil
+		if len(newCfg.Server.TrustedProxiesCIDRs) > 0 {
+			for _, c := range newCfg.Server.TrustedProxiesCIDRs {
+				if _, nw, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil && nw != nil {
+					trustedProxies = append(trustedProxies, nw)
+				}
+			}
+		}
+		// Swap concurrency semaphore
+		m := 2
+		if newCfg.Policy != nil && newCfg.Policy.MaxConcurrent > 0 {
+			m = newCfg.Policy.MaxConcurrent
+		}
+		apiSem.Store(semaphore.NewWeighted(int64(m)))
+	})
+
 	return srv
 }
 
-func setupProbeHandler(
-	mux *http.ServeMux,
-	s *collectors.Settings,
-	baseCfg *cfgpkg.Config,
-	logger *slog.Logger,
-	reqCtr *prometheus.CounterVec,
-	inflight prometheus.Gauge,
-	handlerHist prometheus.Histogram,
-) {
-	// Parse allowed target CIDRs.
-	var allowed []*net.IPNet
-	for _, cidr := range s.ProberAllowCIDRs {
-		_, nw, err := net.ParseCIDR(strings.TrimSpace(cidr))
-		if err == nil && nw != nil {
-			allowed = append(allowed, nw)
-		}
+func nonEmpty(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
 	}
-
-	// Parse allowed client CIDRs (who may call /probe).
-	var clientAllowed []*net.IPNet
-	for _, cidr := range s.ProberClientAllowCIDRs {
-		_, nw, err := net.ParseCIDR(strings.TrimSpace(cidr))
-		if err == nil && nw != nil {
-			clientAllowed = append(clientAllowed, nw)
-		}
-	}
-
-	// Global rate limiter (RPS) for /probe.
-	var lim *rate.Limiter
-	if s.ProberRateLimit > 0 {
-		lim = rate.NewLimiter(rate.Limit(s.ProberRateLimit), max(1, s.ProberBurst))
-	}
-
-	// Global concurrency cap for /probe.
-	sem := make(chan struct{}, max(1, s.ProberMaxConcurrent))
-
-	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
-		// Method check and anti-caching for safety.
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Cache-Control", "no-store")
-
-		start := time.Now()
-		inflight.Inc()
-		defer func() {
-			inflight.Dec()
-			handlerHist.Observe(time.Since(start).Seconds())
-		}()
-
-		// Concurrency guard
-		select {
-		case sem <- struct{}{}:
-			defer func() { <-sem }()
-		default:
-			logger.Info("probe denied: concurrency limit", "remote", r.RemoteAddr)
-			reqCtr.WithLabelValues("concurrency").Inc()
-			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-			return
-		}
-
-		// RPS guard
-		if lim != nil && !lim.Allow() {
-			logger.Info("probe denied: rate limited", "remote", r.RemoteAddr)
-			reqCtr.WithLabelValues("rate_limited").Inc()
-			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-			return
-		}
-
-		// Client allow-list (optionally trusts XFF only if hop is loopback)
-		if len(clientAllowed) > 0 {
-			host := clientIPFromRequest(r)
-			ip := net.ParseIP(host)
-			ok := false
-			for _, nw := range clientAllowed {
-				if nw.Contains(ip) {
-					ok = true
-					break
-				}
-			}
-			if !ok {
-				reqCtr.WithLabelValues("forbidden_client").Inc()
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-		}
-
-		// Auth: accept EITHER Bearer OR Basic if configured.
-		if s.ProberAuthToken != "" || s.ProberBasicUser != "" || s.ProberBasicPass != "" {
-			authOK := false
-			// Bearer
-			if s.ProberAuthToken != "" {
-				ah := r.Header.Get("Authorization")
-				if strings.HasPrefix(ah, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(ah, "Bearer ")) == s.ProberAuthToken {
-					authOK = true
-				}
-			}
-			// Basic
-			if !authOK && (s.ProberBasicUser != "" || s.ProberBasicPass != "") {
-				u, p, ok := r.BasicAuth()
-				if ok && u == s.ProberBasicUser && p == s.ProberBasicPass {
-					authOK = true
-				}
-			}
-			if !authOK {
-				reqCtr.WithLabelValues("unauthorized").Inc()
-				if s.ProberBasicUser != "" || s.ProberBasicPass != "" {
-					w.Header().Set("WWW-Authenticate", `Basic realm="restricted"`)
-				}
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-		}
-
-		// Parse query params
-		q := r.URL.Query()
-		target := strings.TrimSpace(q.Get("target"))
-		ports := strings.TrimSpace(q.Get("ports"))
-		protocol := strings.ToLower(strings.TrimSpace(q.Get("protocol")))
-		if protocol == "" {
-			protocol = "tcp"
-		}
-		if target == "" {
-			reqCtr.WithLabelValues("bad_request").Inc()
-			http.Error(w, "missing target", http.StatusBadRequest)
-			return
-		}
-		if len(allowed) > 0 && !areTargetsAllowed(splitTargets(target), allowed) {
-			reqCtr.WithLabelValues("target_denied").Inc()
-			http.Error(w, "target not allowed", http.StatusForbidden)
-			return
-		}
-
-		// Deadline (respect scrape header with safety margin)
-		timeoutStr := q.Get("timeout")
-		if timeoutStr == "" {
-			timeoutStr = s.ProberDefaultTimeout
-		}
-		d, err := time.ParseDuration(timeoutStr)
-		if err != nil || d <= 0 {
-			d = 10 * time.Second
-		}
-		if hdr := r.Header.Get("X-Prometheus-Scrape-Timeout-Seconds"); hdr != "" {
-			if secs, err := strconv.ParseFloat(hdr, 64); err == nil && secs > 0 {
-				htd := time.Duration(secs*float64(time.Second)) - 250*time.Millisecond
-				if htd > 0 && htd < d {
-					d = htd
-				}
-			}
-		}
-
-		// Apply module defaults if present
-		modName := strings.TrimSpace(q.Get("module"))
-		localCfg := *baseCfg
-		if baseCfg != nil && baseCfg.Prober != nil && modName != "" {
-			if mod, ok := baseCfg.Prober.Modules[modName]; ok {
-				applyModuleToConfig(&localCfg, &mod)
-				if ports == "" && mod.Ports != nil && *mod.Ports != "" {
-					ports = *mod.Ports
-				}
-				if protocol == "" && mod.Protocol != nil && *mod.Protocol != "" {
-					protocol = strings.ToLower(*mod.Protocol)
-				}
-			}
-		}
-
-		maxCfg := time.Duration(localCfg.Scanning.Timeout) * time.Second
-		if maxCfg > 0 && d > maxCfg {
-			d = maxCfg
-		}
-
-		ctx, cancel := context.WithTimeout(r.Context(), d)
-		defer cancel()
-
-		// Validate ports
-		if ports == "" {
-			reqCtr.WithLabelValues("bad_request").Inc()
-			http.Error(w, "missing ports", http.StatusBadRequest)
-			return
-		}
-		if !portsRe.MatchString(ports) {
-			reqCtr.WithLabelValues("bad_request").Inc()
-			http.Error(w, "invalid ports syntax", http.StatusBadRequest)
-			return
-		}
-		if cnt, ok := estimatePortCount(ports); !ok || cnt <= 0 {
-			reqCtr.WithLabelValues("bad_request").Inc()
-			http.Error(w, "invalid ports values", http.StatusBadRequest)
-			return
-		} else if s.ProberMaxPorts > 0 && cnt > s.ProberMaxPorts {
-			reqCtr.WithLabelValues("bad_request").Inc()
-			http.Error(w, "ports selection too large", http.StatusBadRequest)
-			return
-		}
-
-		// Targets fanout bounds
-		targets := splitTargets(target)
-		if s.ProberMaxTargets > 0 && len(targets) > s.ProberMaxTargets {
-			reqCtr.WithLabelValues("bad_request").Inc()
-			http.Error(w, "too many targets", http.StatusBadRequest)
-			return
-		}
-		if len(allowed) > 0 && !areTargetsAllowed(targets, allowed) {
-			reqCtr.WithLabelValues("target_denied").Inc()
-			http.Error(w, "target not allowed", http.StatusForbidden)
-			return
-		}
-
-		// Optional detailed series (bounded)
-		details := q.Get("details") == "1"
-		if details {
-			ipCount := estimateIPCount(targets)
-			portCount, _ := estimatePortCount(ports)
-			const seriesLimit = 5000 // TODO: make configurable
-			if ipCount*portCount > seriesLimit {
-				reqCtr.WithLabelValues("series_limit").Inc()
-				http.Error(w, "details would exceed series limit", http.StatusBadRequest)
-				return
-			}
-		}
-
-		// Per-probe registry
-		preg := prometheus.NewRegistry()
-		probeSuccess := prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "probe_success", Help: "Whether the probe succeeded.",
-		})
-		probeDuration := prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "probe_duration_seconds", Help: "Probe duration in seconds.",
-		})
-		probeOpenPortsTotal := prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "probe_open_ports_total", Help: "Total number of open (ip,port,proto) seen by the probe.",
-		})
-		probeHostsUp := prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "probe_hosts_up", Help: "Number of hosts up in probe.",
-		})
-		probeHostsDown := prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "probe_hosts_down", Help: "Number of hosts down in probe.",
-		})
-		preg.MustRegister(probeSuccess, probeDuration, probeOpenPortsTotal, probeHostsUp, probeHostsDown)
-
-		var probePortOpen *prometheus.GaugeVec
-		if details {
-			probePortOpen = prometheus.NewGaugeVec(
-				prometheus.GaugeOpts{
-					Name: "probe_port_open",
-					Help: "Whether the (ip,port,proto) tuple was open during probe.",
-				},
-				[]string{"ip", "port", "protocol"},
-			)
-			preg.MustRegister(probePortOpen)
-		}
-
-		// Target splitting guard
-		maxCIDR := s.ProberMaxCIDRSize
-		if m := q.Get("max_cidr_size"); m != "" {
-			if v, err := strconv.Atoi(m); err == nil && v > 0 {
-				maxCIDR = v
-			}
-		}
-		subScans := estimateSubScanFanout(targets, maxCIDR)
-		if subScans > 256 {
-			logger.Warn("probe high fanout", "remote", r.RemoteAddr, "targets", len(targets), "subscans", subScans, "max_cidr_size", maxCIDR)
-			reqCtr.WithLabelValues("large_fanout").Inc()
-		}
-
-		// Run scan(s)
-		agg := make(map[string]struct{})
-		totalUp, totalDown := 0, 0
-		var totalDur float64
-		for _, t := range targets {
-			res, up, down, dur, err := scanner.RunImmediateScan(ctx, &localCfg, t, ports, protocol, maxCIDR, logger)
-			if err != nil {
-				reqCtr.WithLabelValues("error").Inc()
-				probeSuccess.Set(0)
-				probeDuration.Set(time.Since(start).Seconds())
-				probeOpenPortsTotal.Set(float64(len(agg)))
-				probeHostsUp.Set(float64(totalUp))
-				probeHostsDown.Set(float64(totalDown))
-				logger.Info("probe", "remote", r.RemoteAddr, "decision", "error", "module", modName, "targets", len(targets), "ports", ports, "protocol", protocol, "open_ports", len(agg), "hosts_up", totalUp, "hosts_down", totalDown, "duration", time.Since(start).Seconds())
-				promhttp.HandlerFor(preg, promhttp.HandlerOpts{}).ServeHTTP(w, r)
-				return
-			}
-			for k := range res {
-				agg[k] = struct{}{}
-			}
-			totalUp += up
-			totalDown += down
-			totalDur += dur
-		}
-
-		avgDur := 0.0
-		if n := len(targets); n > 0 {
-			avgDur = totalDur / float64(n)
-		}
-
-		probeSuccess.Set(1)
-		probeDuration.Set(avgDur)
-		probeOpenPortsTotal.Set(float64(len(agg)))
-		probeHostsUp.Set(float64(totalUp))
-		probeHostsDown.Set(float64(totalDown))
-
-		if details && probePortOpen != nil {
-			for k := range agg {
-				ip, port := splitIPPort(k)
-				probePortOpen.WithLabelValues(ip, port, protocol).Set(1)
-			}
-		}
-
-		reqCtr.WithLabelValues("ok").Inc()
-		logger.Info("probe", "remote", r.RemoteAddr, "decision", "ok", "module", modName, "targets", len(targets), "ports", ports, "protocol", protocol, "open_ports", len(agg), "hosts_up", totalUp, "hosts_down", totalDown, "duration", avgDur)
-		promhttp.HandlerFor(preg, promhttp.HandlerOpts{}).ServeHTTP(w, r)
-	})
+	return v
 }
 
-// clientIPFromRequest returns the caller IP, preferring X-Forwarded-For ONLY when proxied by loopback.
-func clientIPFromRequest(r *http.Request) string {
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
-		xff := r.Header.Get("X-Forwarded-For")
-		if xff != "" {
-			parts := strings.Split(xff, ",")
-			p := strings.TrimSpace(parts[0])
-			return p
-		}
-	}
-	return host
-}
-
-func areTargetsAllowed(targets []string, allowed []*net.IPNet) bool {
-	if len(allowed) == 0 {
-		return true
-	}
-	for _, t := range targets {
-		if !isTargetAllowed(t, allowed) {
-			return false
-		}
+// safe JSON decoder: limits body size and disallows unknown fields
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return false
 	}
 	return true
 }
 
-func isTargetAllowed(target string, allowed []*net.IPNet) bool {
-	if ip := net.ParseIP(target); ip != nil {
-		for _, nw := range allowed {
-			if nw.Contains(ip) {
-				return true
-			}
+// status writer captures status code
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) { sw.status = code; sw.ResponseWriter.WriteHeader(code) }
+
+// instrument wraps a handler to record requests per route/method/status code
+func instrument(cv *prometheus.CounterVec, route string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next(sw, r)
+		code := strconv.Itoa(sw.status)
+		if cv != nil {
+			cv.WithLabelValues(route, r.Method, code).Inc()
 		}
+	}
+}
+
+func checkAuth(r *http.Request, auth *cfgpkg.AuthConfig) bool {
+	if auth == nil {
+		return true
+	}
+	// Bearer
+	if strings.TrimSpace(auth.BearerToken) != "" {
+		ah := r.Header.Get("Authorization")
+		if strings.HasPrefix(ah, "Bearer ") &&
+			strings.TrimSpace(strings.TrimPrefix(ah, "Bearer ")) == auth.BearerToken {
+			return true
+		}
+	}
+	// Basic
+	if auth.Basic.Username != "" || auth.Basic.Password != "" {
+		u, p, ok := r.BasicAuth()
+		if ok && u == auth.Basic.Username && p == auth.Basic.Password {
+			return true
+		}
+	}
+	// If auth is present but empty, deny by default (stricter default)
+	return false
+}
+
+// policy helpers
+func allowClientWithProxies(r *http.Request, p *cfgpkg.PolicyConfig, proxies []*net.IPNet) bool {
+	if p == nil || len(p.ClientAllowCIDRs) == 0 {
+		return true
+	}
+	host := clientIPFromRequest(r, proxies)
+	ip := net.ParseIP(host)
+	if ip == nil {
 		return false
 	}
-	if _, nw, err := net.ParseCIDR(target); err == nil && nw != nil {
-		first := nw.IP
-		last := lastIP(nw)
-		for _, a := range allowed {
-			if a.Contains(first) && a.Contains(last) {
-				return true
-			}
+	for _, cidr := range p.ClientAllowCIDRs {
+		_, nw, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err == nil && nw != nil && nw.Contains(ip) {
+			return true
 		}
-		return false
 	}
 	return false
 }
 
-func splitIPPort(k string) (string, string) {
-	if i := strings.LastIndexByte(k, '/'); i >= 0 {
-		k = k[:i]
-	}
-	if host, port, err := net.SplitHostPort(k); err == nil {
-		return host, port
-	}
-	if i := strings.LastIndex(k, ":"); i != -1 && i < len(k)-1 {
-		return k[:i], k[i+1:]
-	}
-	return k, ""
-}
+// removed global rate limiter (replaced by RateGuards)
 
-func estimateIPCount(targets []string) int {
-	total := 0
-	for _, t := range targets {
-		t = strings.TrimSpace(t)
-		if t == "" {
-			continue
-		}
-		if ip := net.ParseIP(t); ip != nil {
-			total++
-			continue
-		}
-		_, nw, err := net.ParseCIDR(t)
-		if err != nil || nw == nil {
-			continue
-		}
-		ones, bits := nw.Mask.Size()
-		span := bits - ones
-		if span >= 31 {
-			return math.MaxInt32 / 2
-		}
-		total += 1 << span
-		if total < 0 || total > math.MaxInt32/2 {
-			return math.MaxInt32 / 2
-		}
-	}
-	return total
-}
-
-func estimateSubScanFanout(targets []string, maxCIDRSize int) int {
-	total := 0
-	for _, t := range targets {
-		t = strings.TrimSpace(t)
-		if t == "" {
-			continue
-		}
-		if ip := net.ParseIP(t); ip != nil {
-			total++
-			continue
-		}
-		_, nw, err := net.ParseCIDR(t)
-		if err != nil || nw == nil {
-			continue
-		}
-		ones, _ := nw.Mask.Size()
-		if ones >= maxCIDRSize {
-			total++
-		} else {
-			span := maxCIDRSize - ones
-			if span >= 31 {
-				total += math.MaxInt32 / 4
-			} else {
-				total += 1 << span
-			}
-		}
-		if total < 0 || total > math.MaxInt32/2 {
-			return math.MaxInt32 / 2
-		}
-	}
-	return total
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func lastIP(nw *net.IPNet) net.IP {
-	ip := nw.IP
-	mask := nw.Mask
-	if v4 := ip.To4(); v4 != nil {
-		ip4 := v4
-		last := make(net.IP, net.IPv4len)
-		for i := 0; i < net.IPv4len; i++ {
-			last[i] = ip4[i] | ^mask[i]
-		}
-		return last
-	}
-	ip16 := ip.To16()
-	if ip16 == nil {
-		return nil
-	}
-	last := make(net.IP, net.IPv6len)
-	for i := 0; i < net.IPv6len; i++ {
-		last[i] = ip16[i] | ^mask[i]
-	}
-	return last
-}
-
-func applyModuleToConfig(cfg *cfgpkg.Config, mod *cfgpkg.ProberModule) {
-	sc := &cfg.Scanning
-	if mod.UseSYNScan != nil {
-		sc.UseSYNScan = mod.UseSYNScan
-	}
-	if mod.MinRate != nil {
-		sc.MinRate = *mod.MinRate
-	}
-	if mod.MaxRate != nil {
-		sc.MaxRate = *mod.MaxRate
-	}
-	if mod.MinParallelism != nil {
-		sc.MinParallelism = *mod.MinParallelism
-	}
-	if mod.MaxRetries != nil {
-		sc.MaxRetries = *mod.MaxRetries
-	}
-	if mod.HostTimeout != nil {
-		sc.HostTimeout = *mod.HostTimeout
-	}
-	if mod.ScanDelay != nil {
-		sc.ScanDelay = *mod.ScanDelay
-	}
-	if mod.MaxScanDelay != nil {
-		sc.MaxScanDelay = *mod.MaxScanDelay
-	}
-	if mod.InitialRttTimeout != nil {
-		sc.InitialRttTimeout = *mod.InitialRttTimeout
-	}
-	if mod.MaxRttTimeout != nil {
-		sc.MaxRttTimeout = *mod.MaxRttTimeout
-	}
-	if mod.MinRttTimeout != nil {
-		sc.MinRttTimeout = *mod.MinRttTimeout
-	}
-	if mod.DisableHostDiscovery != nil {
-		sc.DisableHostDiscovery = *mod.DisableHostDiscovery
-	}
-}
-
-func splitTargets(s string) []string {
-	fs := func(r rune) bool { return r == ',' || unicode.IsSpace(r) }
-	var out []string
-	for _, p := range strings.FieldsFunc(s, fs) {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 && strings.TrimSpace(s) != "" {
-		out = append(out, strings.TrimSpace(s))
-	}
-	return out
-}
-
+// estimate helpers (duplicated small helpers to avoid exporting internals)
 func estimatePortCount(ports string) (int, bool) {
 	tokens := strings.Split(ports, ",")
 	total := 0
@@ -690,9 +522,89 @@ func estimatePortCount(ports string) (int, bool) {
 			}
 			total++
 		}
-		if total < 0 {
-			return 0, false
-		}
 	}
 	return total, true
+}
+
+func estimateIPCount(targets []string) int {
+	total := 0
+	for _, t := range targets {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if ip := net.ParseIP(t); ip != nil {
+			total++
+			continue
+		}
+		_, nw, err := net.ParseCIDR(t)
+		if err != nil || nw == nil {
+			continue
+		}
+		ones, bits := nw.Mask.Size()
+		span := bits - ones
+		if span >= 31 {
+			return 1 << 30
+		}
+		total += 1 << span
+		if total < 0 {
+			return 1 << 30
+		}
+	}
+	return total
+}
+
+func estimateSubScanFanout(targets []string, maxCIDRSize int) int {
+	total := 0
+	for _, t := range targets {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if ip := net.ParseIP(t); ip != nil {
+			total++
+			continue
+		}
+		_, nw, err := net.ParseCIDR(t)
+		if err != nil || nw == nil {
+			continue
+		}
+		ones, _ := nw.Mask.Size()
+		if ones >= maxCIDRSize {
+			total++
+		} else {
+			span := maxCIDRSize - ones
+			if span >= 31 {
+				total += 1 << 30
+			} else {
+				total += 1 << span
+			}
+		}
+		if total < 0 {
+			return 1 << 30
+		}
+	}
+	return total
+}
+
+func clientIPFromRequest(r *http.Request, proxies []*net.IPNet) string {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified() || ipInAny(ip, proxies)) {
+		xff := r.Header.Get("X-Forwarded-For")
+		if xff != "" {
+			parts := strings.Split(xff, ",")
+			p := strings.TrimSpace(parts[0])
+			return p
+		}
+	}
+	return host
+}
+
+func ipInAny(ip net.IP, nets []*net.IPNet) bool {
+	for _, nw := range nets {
+		if nw.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

@@ -1,25 +1,49 @@
+# Override the generated full name
 fullnameOverride: "openport-exporter"
+# Optional shorter name override
+nameOverride: ""
+
 # The container image to deploy
 image:
   repository: ghcr.io/renatogalera/openport-exporter
-  tag: v0.2.0
-  pullPolicy: "IfNotPresent"
+  # If empty, the chart's appVersion will be used
+  tag: ""
+  pullPolicy: IfNotPresent
+  # For private registries
+  pullSecrets: []
+  # - name: my-regcred
+
 # Replica count for the Deployment
 replicaCount: 1
-deployment:
-  annotations: {}
-  labels: {}
+
+# Port the container will LISTEN on (exporter binds to LISTEN_PORT env)
+listenPort: 9919
+
+# HTTP metrics path
+metrics:
+  path: /metrics
+
+# Deployment-level annotations/labels
+deploymentAnnotations: {}
+deploymentLabels: {}
+
+# Pod-level annotations/labels
+podAnnotations: {}
+podLabels: {}
+
 # Pod disruption budget settings
 podDisruptionBudget:
-  annotations: {}
-  labels: {}
   enabled: false
   minAvailable: 1
-  maxUnavailable: ""
+  # maxUnavailable: ""
+
 # Kubernetes service account
 serviceAccount:
   create: true
   name: ""
+  annotations: {}
+  automount: true
+
 # Add environment variables that the container should use
 extraEnv: []
 # - name: EXAMPLE_ENV
@@ -36,21 +60,10 @@ extraArgs: []
 # - --config.path=/app/config.yaml
 # - --collector.go                   # enable Go runtime metrics
 # - --collector.build_info=false     # disable build_info collector
-# Prober endpoint (opt-in, disabled by default):
+# Prober flags (legacy; prefer config.targets/scheduler/modules)
 # - --prober.enable
-# - --prober.allow_cidr=192.168.0.0/16       # repeatable
-# - --prober.allow_cidr=10.0.0.0/8           # repeatable
-# - --prober.client_allow_cidr=10.0.0.0/8    # repeatable (client IPs)
-# - --prober.rate_limit=1
-# - --prober.burst=1
-# - --prober.max_cidr_size=24
-# - --prober.max_concurrent=1
-# - --prober.max_ports=4096
-# - --prober.max_targets=32
-# - --prober.default_timeout=10s
-# - --prober.auth_token=changeme
-# - --prober.basic_user=user
-# - --prober.basic_pass=pass
+# - --prober.allow_cidr=192.168.0.0/16
+# - --prober.client_allow_cidr=10.0.0.0/8
 
 # Resource requests and limits
 resources:
@@ -60,24 +73,19 @@ resources:
   limits:
     memory: "512Mi"
     cpu: "500m"
+
 # Node scheduling
 nodeSelector: {}
 tolerations: []
 affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
 # SecurityContext at the Pod level
 podSecurityContext: {}
-# Example:
-# runAsUser: 1000
-# fsGroup: 2000
 
 # Container SecurityContext
 containerSecurityContext: {}
-# Example:
-# privileged: true
-# capabilities:
-#   add:
-#     - NET_ADMIN
-#     - NET_RAW
 
 # Readiness and Liveness probes configuration
 readinessProbe:
@@ -87,6 +95,7 @@ readinessProbe:
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3
+
 livenessProbe:
   enabled: true
   path: "/-/healthy"
@@ -94,23 +103,31 @@ livenessProbe:
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3
+
 # Ingress configuration
 ingress:
   enabled: false
-  className: "nginx"
+  className: ""
+  # Prefer the list form; 'host' kept for backwards compatibility
   host: "openport.example.com"
+  hosts: []
+  #  - host: openport.example.com
+  #    paths:
+  #      - path: /
+  #        pathType: Prefix
   annotations: {}
   tls: []
-  # Example:
-  # tls:
-  #   - hosts:
-  #     - "openport.example.com"
-  #     secretName: "openport-tls-cert"
+  #  - hosts: ["openport.example.com"]
+  #    secretName: openport-tls-cert
+
 # Service configuration
 service:
   type: ClusterIP
   port: 9919
   annotations: {}
+  labels: {}
+  # nodePort: 309919   # if type=NodePort
+
 # Prometheus ServiceMonitor configuration
 serviceMonitor:
   enabled: false
@@ -119,100 +136,114 @@ serviceMonitor:
   labels: {}
   annotations: {}
   namespace: ""
+  # Advanced relabelings (optional)
+  relabelings: []
+  metricRelabelings: []
+
 # Additional labels and annotations for the ConfigMap (optional)
 configMap:
   labels: {}
   annotations: {}
+
 # Config file data mapped to config.yaml
 config:
   server:
     port: 9919
+    trusted_proxies_cidrs: []
   scanning:
     interval: 10800
     port_range: "1-65535"
     max_cidr_size: 24
     timeout: 3600
-    duration_metrics: true
+    duration_metrics: false
     disable_dns_resolution: true
     udp_scan: false
     use_syn_scan: true
+    # Legacy worker knobs (scheduler.* is preferred but used as fallback)
     rate_limit: 60
     task_queue_size: 100
     worker_count: 5
-    # --- Nmap Performance Tuning Options ---
-    # For detailed explanations of these options, refer to the "Performance Tuning with Nmap Options" section in the chart's README.
-    # Minimum packet rate per second to send to the target. Increasing this can speed up scans.
-    # Be cautious with high values, as they might lead to inaccurate results or network congestion.
+    # Nmap tuning
     min_rate: 1000
-    # Maximum packet rate per second to send. Set to 0 for unlimited rate (only bounded by min_rate).
-    # Use this to limit scan speed and reduce network impact or avoid detection.
     max_rate: 0
-    # Minimum number of probes to send in parallel during port scanning.
-    # Increasing this can speed up scans, especially when scanning many ports or hosts.
     min_parallelism: 1000
-    # Maximum number of port scan probe retransmissions. Lowering this can speed up scans in reliable networks.
-    # However, it might lead to missed open ports in less reliable environments.
     max_retries: 6
-    # Maximum time in seconds Nmap will spend scanning a single host.
-    # Reducing this timeout will make Nmap skip slow or down hosts, speeding up overall scan time.
-    host_timeout: 300 # seconds (5 minutes)
-    # Minimum delay in milliseconds between probes sent to a host.
-    # Increasing this can make scans slower and less intrusive, potentially avoiding detection.
-    scan_delay: 0 # milliseconds
-    # Maximum scan delay that Nmap will adjust to during runtime, in milliseconds.
-    max_scan_delay: 0 # milliseconds
-    # Initial round-trip time timeout for probes, in milliseconds. Lowering this can be beneficial in low-latency networks.
-    initial_rtt_timeout: 0 # milliseconds
-    # Maximum round-trip time timeout, in milliseconds.
-    max_rtt_timeout: 0 # milliseconds
-    # Minimum round-trip time timeout, in milliseconds.
-    min_rtt_timeout: 0 # milliseconds
-    # Disable Nmap host discovery (-Pn option). Assumes all target hosts are online.
-    # Can significantly speed up scans if you are certain targets are active. Use with caution.
+    host_timeout: 300
+    scan_delay: 0
+    max_scan_delay: 0
+    initial_rtt_timeout: 0
+    max_rtt_timeout: 0
+    min_rtt_timeout: 0
     disable_host_discovery: true
-  # Basic auth (optional)
+
+  # Authentication for Tasks API (optional)
   auth:
+    bearer_token: ""
     basic:
       username: ""
       password: ""
-  # Periodic scan targets
+
+  # Background targets (module is currently ignored by background scheduler)
   targets:
-    - "192.168.1.0/24"
-    - "10.0.0.0/24"
-  # Prober configuration (YAML; prefer this over extraArgs)
-  prober:
-    enabled: false
-    allow_cidrs: [] # e.g., ["10.0.0.0/8", "192.168.0.0/16"]
-    client_allow_cidrs: [] # who can call /probe (client IPs)
-    rate_limit: 1
-    burst: 1
-    max_cidr_size: 24
-    max_concurrent: 1
-    default_timeout: "10s"
-    max_ports: 4096
-    max_targets: 32
-    auth_token: ""
-    basic_user: ""
-    basic_pass: ""
-    # Prober modules (optional presets)
-    modules:
-      tcp_syn_fast:
-        protocol: tcp
-        ports: "22,80,443,1000-1024"
-        use_syn_scan: true
-        min_rate: 2000
-        min_parallelism: 1000
-        max_retries: 3
-        host_timeout: 180
-        disable_host_discovery: true
-      tcp_connect_safe:
-        protocol: tcp
-        ports: "22,80,443"
-        use_syn_scan: false
-        max_retries: 2
-        host_timeout: 120
-      udp_basic:
-        protocol: udp
-        ports: "53,123"
-        max_retries: 3
-        host_timeout: 120
+    - name: "dmz_ssh"
+      target: "192.168.1.0/24"
+      port_range: "22"
+      protocol: "tcp"
+      interval: "1h"
+      module: "tcp_syn_fast"
+    - name: "branch_web"
+      target: "10.0.0.0/24"
+      port_range: "80,443"
+      protocol: "tcp"
+      interval: "2h"
+      module: "tcp_connect_safe"
+
+  # Optional allowlisted detailed per-port series (bounded by budget)
+  # background_details:
+  #   enabled: true
+  #   series_budget: 2000
+  #   ttl: "30m"
+  #   include_alias: true
+  #   include_ip: true
+  #   targets:
+  #     - alias: "ssh-bastion-primary"
+  #       cidr: "203.0.113.10/32"
+  #       protocol: "tcp"
+  #       ports: ["22"]
+
+  policy:
+    client_allow_cidrs: ["127.0.0.0/8"]
+    rate_limit_rps: 2.0
+    rate_burst: 2
+    max_concurrent: 2
+    series_limit: 250000
+
+  scheduler:
+    worker_count: 5
+    task_queue_size: 100
+    default_timeout: "30m"
+    default_max_cidr_size: 24
+    dedupe_ttl: "15m"
+    task_gc_max: 10000
+    task_gc_max_age: "24h"
+    module_limits:
+      default: 0
+      tcp_syn_fast: 2
+
+  modules:
+    tcp_syn_fast:
+      protocol: tcp
+      ports: "22,80,443,1000-1024"
+      use_syn_scan: true
+      min_rate: 2000
+      min_parallelism: 1000
+      max_retries: 3
+      host_timeout: 180
+      disable_host_discovery: true
+    tcp_connect_safe:
+      protocol: tcp
+      ports: "22,80,443"
+      use_syn_scan: false
+      max_retries: 2
+      host_timeout: 120
+

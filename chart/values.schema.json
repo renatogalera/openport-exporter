@@ -1,83 +1,87 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "openport-exporter values",
   "type": "object",
   "properties": {
     "fullnameOverride": { "type": "string" },
+    "nameOverride": { "type": "string" },
+
     "image": {
       "type": "object",
       "properties": {
         "repository": { "type": "string" },
         "tag": { "type": "string" },
-        "pullPolicy": { "type": "string", "enum": ["IfNotPresent", "Always", "Never"] }
+        "pullPolicy": { "type": "string", "enum": ["IfNotPresent", "Always", "Never"] },
+        "pullSecrets": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }
+        }
       },
-      "required": ["repository", "tag", "pullPolicy"]
+      "required": ["repository", "pullPolicy"]
     },
+
     "replicaCount": { "type": "integer", "minimum": 1 },
-    "deployment": {
+    "listenPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+
+    "metrics": {
       "type": "object",
       "properties": {
-        "annotations": { "type": "object" },
-        "labels": { "type": "object" }
-      }
+        "path": { "type": "string", "pattern": "^/.+" }
+      },
+      "required": ["path"]
     },
+
+    "deploymentAnnotations": { "type": "object" },
+    "deploymentLabels": { "type": "object" },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+
     "podDisruptionBudget": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
         "minAvailable": { "type": ["integer", "string"] },
-        "maxUnavailable": { "type": ["integer", "string"] },
-        "annotations": { "type": "object" },
-        "labels": { "type": "object" }
+        "maxUnavailable": { "type": ["integer", "string"] }
       }
     },
+
     "serviceAccount": {
       "type": "object",
       "properties": {
         "create": { "type": "boolean" },
-        "name": { "type": "string" }
+        "name": { "type": "string" },
+        "annotations": { "type": "object" },
+        "automount": { "type": "boolean" }
       }
     },
+
     "extraEnv": {
       "type": "array",
       "items": {
         "type": "object",
-        "properties": {
-          "name": { "type": "string" },
-          "value": { "type": "string" }
-        },
+        "properties": { "name": { "type": "string" }, "value": { "type": "string" } },
         "required": ["name", "value"]
       }
     },
     "extraArgs": { "type": "array", "items": { "type": "string" } },
+
     "resources": {
       "type": "object",
       "properties": {
-        "requests": {
-          "type": "object",
-          "properties": {
-            "cpu": { "type": "string" },
-            "memory": { "type": "string" }
-          }
-        },
-        "limits": {
-          "type": "object",
-          "properties": {
-            "cpu": { "type": "string" },
-            "memory": { "type": "string" }
-          }
-        }
+        "requests": { "type": "object" },
+        "limits": { "type": "object" }
       }
     },
+
     "nodeSelector": { "type": "object" },
     "tolerations": { "type": "array", "items": { "type": "object" } },
     "affinity": { "type": "object" },
+    "topologySpreadConstraints": { "type": "array", "items": { "type": "object" } },
+    "priorityClassName": { "type": "string" },
+
     "podSecurityContext": { "type": "object" },
-    "containerSecurityContext": {
-      "type": "object",
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
-    },
+    "containerSecurityContext": { "type": "object" },
+
     "readinessProbe": {
       "type": "object",
       "properties": {
@@ -89,6 +93,7 @@
         "failureThreshold": { "type": "integer", "minimum": 1 }
       }
     },
+
     "livenessProbe": {
       "type": "object",
       "properties": {
@@ -100,25 +105,31 @@
         "failureThreshold": { "type": "integer", "minimum": 1 }
       }
     },
+
     "ingress": {
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
         "className": { "type": "string" },
         "host": { "type": "string" },
+        "hosts": { "type": "array", "items": { "type": "object" } },
         "annotations": { "type": "object" },
         "tls": { "type": "array", "items": { "type": "object" } }
       }
     },
+
     "service": {
       "type": "object",
       "properties": {
         "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "annotations": { "type": "object" }
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" },
+        "nodePort": { "type": ["integer", "null"], "minimum": 1, "maximum": 65535 }
       },
       "required": ["type", "port"]
     },
+
     "serviceMonitor": {
       "type": "object",
       "properties": {
@@ -127,9 +138,12 @@
         "scrapeTimeout": { "type": "string" },
         "labels": { "type": "object" },
         "annotations": { "type": "object" },
-        "namespace": { "type": "string" }
+        "namespace": { "type": "string" },
+        "relabelings": { "type": "array", "items": { "type": "object" } },
+        "metricRelabelings": { "type": "array", "items": { "type": "object" } }
       }
     },
+
     "configMap": {
       "type": "object",
       "properties": {
@@ -137,12 +151,16 @@
         "annotations": { "type": "object" }
       }
     },
+
     "config": {
       "type": "object",
       "properties": {
         "server": {
           "type": "object",
-          "properties": { "port": { "type": "integer", "minimum": 0, "maximum": 65535 } }
+          "properties": {
+            "port": { "type": "integer", "minimum": 0, "maximum": 65535 },
+            "trusted_proxies_cidrs": { "type": "array", "items": { "type": "string" } }
+          }
         },
         "scanning": {
           "type": "object",
@@ -174,58 +192,98 @@
         "auth": {
           "type": "object",
           "properties": {
+            "bearer_token": { "type": "string" },
             "basic": {
               "type": "object",
-              "properties": {
-                "username": { "type": "string" },
-                "password": { "type": "string" }
+              "properties": { "username": { "type": "string" }, "password": { "type": "string" } }
+            }
+          }
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "target": { "type": "string" },
+              "port_range": { "type": "string" },
+              "protocol": { "type": "string", "enum": ["tcp", "udp"] },
+              "interval": { "type": "string" },
+              "module": { "type": "string" }
+            },
+            "required": ["target"]
+          }
+        },
+        "background_details": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "series_budget": { "type": "integer", "minimum": 0 },
+            "ttl": { "type": "string" },
+            "include_alias": { "type": "boolean" },
+            "include_ip": { "type": ["boolean", "null"] },
+            "targets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "alias": { "type": "string" },
+                  "cidr": { "type": "string" },
+                  "protocol": { "type": "string" },
+                  "ports": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["alias", "cidr", "ports"]
               }
             }
           }
         },
-        "targets": { "type": "array", "items": { "type": "string" } },
-        "prober": {
+        "policy": {
           "type": "object",
           "properties": {
-            "enabled": { "type": "boolean" },
-            "allow_cidrs": { "type": "array", "items": { "type": "string" } },
             "client_allow_cidrs": { "type": "array", "items": { "type": "string" } },
-            "rate_limit": { "type": "number", "minimum": 0 },
-            "burst": { "type": "integer", "minimum": 0 },
-            "max_cidr_size": { "type": "integer", "minimum": 1, "maximum": 128 },
+            "rate_limit_rps": { "type": "number" },
+            "rate_burst": { "type": "integer", "minimum": 0 },
             "max_concurrent": { "type": "integer", "minimum": 1 },
+            "series_limit": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "scheduler": {
+          "type": "object",
+          "properties": {
+            "worker_count": { "type": "integer", "minimum": 1 },
+            "task_queue_size": { "type": "integer", "minimum": 1 },
             "default_timeout": { "type": "string" },
-            "max_ports": { "type": "integer", "minimum": 1 },
-            "max_targets": { "type": "integer", "minimum": 1 },
-            "auth_token": { "type": "string" },
-            "basic_user": { "type": "string" },
-            "basic_pass": { "type": "string" },
-            "modules": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "object",
-                "properties": {
-                  "protocol": { "type": ["string", "null"], "enum": ["tcp", "udp", null] },
-                  "ports": { "type": ["string", "null"] },
-                  "use_syn_scan": { "type": ["boolean", "null"] },
-                  "min_rate": { "type": ["integer", "null"], "minimum": 0 },
-                  "max_rate": { "type": ["integer", "null"], "minimum": 0 },
-                  "min_parallelism": { "type": ["integer", "null"], "minimum": 0 },
-                  "max_retries": { "type": ["integer", "null"], "minimum": 0 },
-                  "host_timeout": { "type": ["integer", "null"], "minimum": 0 },
-                  "scan_delay": { "type": ["integer", "null"], "minimum": 0 },
-                  "max_scan_delay": { "type": ["integer", "null"], "minimum": 0 },
-                  "initial_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
-                  "max_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
-                  "min_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
-                  "disable_host_discovery": { "type": ["boolean", "null"] }
-                }
-              }
+            "default_max_cidr_size": { "type": "integer", "minimum": 1, "maximum": 128 },
+            "dedupe_ttl": { "type": "string" },
+            "task_gc_max": { "type": "integer", "minimum": 1 },
+            "task_gc_max_age": { "type": "string" },
+            "module_limits": { "type": "object" }
+          }
+        },
+        "modules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "protocol": { "type": ["string", "null"], "enum": ["tcp", "udp", null] },
+              "ports": { "type": ["string", "null"] },
+              "use_syn_scan": { "type": ["boolean", "null"] },
+              "min_rate": { "type": ["integer", "null"], "minimum": 0 },
+              "max_rate": { "type": ["integer", "null"], "minimum": 0 },
+              "min_parallelism": { "type": ["integer", "null"], "minimum": 0 },
+              "max_retries": { "type": ["integer", "null"], "minimum": 0 },
+              "host_timeout": { "type": ["integer", "null"], "minimum": 0 },
+              "scan_delay": { "type": ["integer", "null"], "minimum": 0 },
+              "max_scan_delay": { "type": ["integer", "null"], "minimum": 0 },
+              "initial_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
+              "max_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
+              "min_rtt_timeout": { "type": ["integer", "null"], "minimum": 0 },
+              "disable_host_discovery": { "type": ["boolean", "null"] }
             }
           }
         }
       }
     }
   },
-  "required": ["image", "replicaCount", "service"]
+  "required": ["image", "replicaCount", "service", "metrics", "config"]
 }

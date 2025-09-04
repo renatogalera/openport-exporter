@@ -28,8 +28,16 @@ auth:
     username: testuser
     password: testpass
 targets:
-  - 192.168.1.1/24
-  - 10.0.0.0/16
+  - name: t1
+    target: 192.168.1.1/24
+    port_range: "1-1000"
+    protocol: tcp
+    interval: "1h"
+  - name: t2
+    target: 10.0.0.0/16
+    port_range: "1-1000"
+    protocol: tcp
+    interval: "2h"
 `
 	tmpfile, err := os.CreateTemp("", "config_test")
 	if err != nil {
@@ -76,6 +84,12 @@ func TestLoadConfigDefaults(t *testing.T) {
 	content := `
 server:
   port: 8080
+targets:
+  - name: t1
+    target: 127.0.0.1/32
+    port_range: "22"
+    protocol: tcp
+    interval: "1h"
 `
 	tmpfile, err := os.CreateTemp("", "config_test_defaults")
 	if err != nil {
@@ -98,16 +112,32 @@ server:
 
 	// Check if default values are set correctly
 	if config.Scanning.Interval != DefaultScanInterval {
-		t.Errorf("Expected default Scanning.Interval to be %d, got %d", DefaultScanInterval, config.Scanning.Interval)
+		t.Errorf(
+			"Expected default Scanning.Interval to be %d, got %d",
+			DefaultScanInterval,
+			config.Scanning.Interval,
+		)
 	}
 	if config.Scanning.Timeout != DefaultScanTimeout {
-		t.Errorf("Expected default Scanning.Timeout to be %d, got %d", DefaultScanTimeout, config.Scanning.Timeout)
+		t.Errorf(
+			"Expected default Scanning.Timeout to be %d, got %d",
+			DefaultScanTimeout,
+			config.Scanning.Timeout,
+		)
 	}
 	if config.Scanning.PortRange != DefaultPortRange {
-		t.Errorf("Expected default Scanning.PortRange to be '%s', got '%s'", DefaultPortRange, config.Scanning.PortRange)
+		t.Errorf(
+			"Expected default Scanning.PortRange to be '%s', got '%s'",
+			DefaultPortRange,
+			config.Scanning.PortRange,
+		)
 	}
 	if config.Scanning.RateLimit != DefaultRateLimit {
-		t.Errorf("Expected default Performance.RateLimit to be %d, got %d", DefaultRateLimit, config.Scanning.RateLimit)
+		t.Errorf(
+			"Expected default Performance.RateLimit to be %d, got %d",
+			DefaultRateLimit,
+			config.Scanning.RateLimit,
+		)
 	}
 }
 

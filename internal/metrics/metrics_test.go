@@ -9,28 +9,36 @@ import (
 )
 
 func TestUpdateMetrics(t *testing.T) {
-    mc := NewMetricsCollector()
+	mc := NewMetricsCollector()
 
-    // targetKey format: target_portRange_proto
-    target := "192.168.1.0/24"
-    portRange := "80,443"
-    proto := "tcp"
-    targetKey := target + "_" + portRange + "_" + proto
+	// targetKey format: target_portRange_proto
+	target := "192.168.1.0/24"
+	portRange := "80,443"
+	proto := "tcp"
+	targetKey := target + "_" + portRange + "_" + proto
 
-    // First run: two open ports in aggregate
-    newResults := map[string]struct{}{
-        "192.168.1.10:80/tcp":  {},
-        "192.168.1.20:443/tcp": {},
-    }
-    mc.UpdateMetrics(targetKey, newResults)
-    assert.Equal(t, float64(2), testutil.ToFloat64(mc.scanTargetOpenPortsTotal.WithLabelValues(target, portRange, proto)))
+	// First run: two open ports in aggregate
+	newResults := map[string]struct{}{
+		"192.168.1.10:80/tcp":  {},
+		"192.168.1.20:443/tcp": {},
+	}
+	mc.UpdateMetrics(targetKey, newResults)
+	assert.Equal(
+		t,
+		float64(2),
+		testutil.ToFloat64(mc.scanTargetOpenPortsTotal.WithLabelValues(target, portRange, proto)),
+	)
 
-    // Second run: only one open port remains
-    newResults = map[string]struct{}{
-        "192.168.1.10:80/tcp": {},
-    }
-    mc.UpdateMetrics(targetKey, newResults)
-    assert.Equal(t, float64(1), testutil.ToFloat64(mc.scanTargetOpenPortsTotal.WithLabelValues(target, portRange, proto)))
+	// Second run: only one open port remains
+	newResults = map[string]struct{}{
+		"192.168.1.10:80/tcp": {},
+	}
+	mc.UpdateMetrics(targetKey, newResults)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(mc.scanTargetOpenPortsTotal.WithLabelValues(target, portRange, proto)),
+	)
 }
 
 func TestCanScan(t *testing.T) {
@@ -98,5 +106,5 @@ func TestUpdateTaskQueueSize(t *testing.T) {
 	mc.UpdateTaskQueueSize(queueSize)
 
 	// Check if the task queue size metric was updated correctly
-	assert.Equal(t, float64(queueSize), testutil.ToFloat64(mc.taskQueueSizeMetric))
+	assert.Equal(t, float64(queueSize), testutil.ToFloat64(mc.schedulerQueueSize))
 }

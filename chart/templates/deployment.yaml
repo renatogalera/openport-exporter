@@ -2,89 +2,123 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "openport-exporter.fullname" . }}
+  labels:
+    {{- include "openport-exporter.labels" . | nindent 4 }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "openport-exporter.name" . }}
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "openport-exporter.selectorLabels" . | nindent 6 }}
   strategy:
     type: RollingUpdate
   template:
     metadata:
-    {{- if .Values.configMap.labels }}
       labels:
-    {{- toYaml .Values.deployment.labels | nindent 10 }}
-    {{- end }}
-    {{- if .Values.deployment.annotations }}
+        {{- include "openport-exporter.selectorLabels" . | nindent 8 }}
+        {{- with .Values.deploymentLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
-    {{- toYaml .Values.deployment.annotations | nindent 10 }}
-    {{- end }}
+        checksum/config: {{ toYaml .Values.config | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "openport-exporter.serviceAccountName" . }}
-      {{- if .Values.podSecurityContext }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      {{- end }}
-      {{- if .Values.containerSecurityContext.enabled }}
-      nodeSelector:
-        {{- toYaml .Values.nodeSelector | nindent 8 }}
-      {{- end }}
-      {{- if .Values.tolerations }}
-      tolerations:
-        {{- toYaml .Values.tolerations | nindent 8 }}
-      {{- end }}
-      {{- if .Values.affinity }}
-      affinity:
-        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-      - name: openport-exporter
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        {{- if .Values.extraArgs }}
-        args:
-          {{- toYaml .Values.extraArgs | nindent 10 }}
-        {{- end }}
-        {{- if .Values.containerSecurityContext.enabled }}
-        securityContext:
-          {{- toYaml .Values.containerSecurityContext | nindent 10 }}
-        {{- end }}
-        ports:
-          - containerPort: {{ .Values.config.server.port }}
-            name: metrics
-        env:
-          {{- range .Values.extraEnv }}
-          - name: {{ .name }}
-            value: "{{ .value }}"
+        - name: openport-exporter
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
-        volumeMounts:
-          - name: config-volume
-            mountPath: /app/config.yaml
-            subPath: config.yaml
-        resources:
-          {{- toYaml .Values.resources | nindent 10 }}
-        {{- if .Values.readinessProbe.enabled }}
-        readinessProbe:
-          httpGet:
-            path: {{ .Values.readinessProbe.path | default "/-/ready" }}
-            port: metrics
-          initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
-          periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
-          timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
-          failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
-        {{- end }}
-        {{- if .Values.livenessProbe.enabled }}
-        livenessProbe:
-          httpGet:
-            path: {{ .Values.livenessProbe.path | default "/-/healthy" }}
-            port: metrics
-          initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
-          periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
-          timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
-          failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
-        {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.listenPort | default 9919 }}
+              protocol: TCP
+          env:
+            - name: CONFIG_PATH
+              value: "/app/config.yaml"
+            - name: LISTEN_PORT
+              value: "{{ .Values.listenPort | default 9919 }}"
+            - name: METRICS_PATH
+              value: "{{ .Values.metrics.path | default "/metrics" }}"
+            - name: ENABLE_GO_COLLECTOR
+              value: "false"
+            - name: ENABLE_BUILD_INFO
+              value: "true"
+            {{- range .Values.extraEnv }}
+            - name: {{ .name | quote }}
+              value: {{ .value | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.path | default "/-/ready" }}
+              port: metrics
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path | default "/-/healthy" }}
+              port: metrics
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          {{- end }}
       volumes:
-        - name: config-volume
+        - name: config
           configMap:
             name: {{ include "openport-exporter.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
