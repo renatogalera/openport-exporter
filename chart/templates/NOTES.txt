@@ -1,0 +1,13 @@
+OpenPort Exporter has been deployed.
+
+Service:
+  kubectl get svc {{ include "openport-exporter.fullname" . }}
+
+Pods:
+  kubectl get pods -l {{ include "openport-exporter.selectorLabels" . | replace "\n" "," }}
+
+Metrics:
+  Path: {{ .Values.metrics.path | default "/metrics" }}
+  Port: {{ .Values.service.port }}
+
+If you enabled ServiceMonitor, Prometheus Operator should start scraping shortly.

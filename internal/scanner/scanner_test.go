@@ -2,7 +2,6 @@ package scanner
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"os/exec"
 	"reflect"
@@ -17,7 +16,7 @@ import (
 // --- helpers ---
 
 func silentLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 // --- splitIntoSubnets / IPv4/IPv6 ---
@@ -61,7 +60,7 @@ func TestSplitIntoSubnets_IPv4_SplitIntoQuarters(t *testing.T) {
 }
 
 func TestSplitIntoSubnets_IPv4_MaxLessThanOnes_NoMerge(t *testing.T) {
-	// ones=24, max=16 => função não pode "agregar"; retorna a CIDR original.
+	// ones=24, max=16 => function cannot "aggregate"; returns the original CIDR.
 	got, err := splitIntoSubnets("172.16.5.0/24", 16)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -84,7 +83,7 @@ func TestSplitIntoSubnets_IPv6_NoSplit(t *testing.T) {
 }
 
 func TestSplitIntoSubnets_IPv6_SplitSmall(t *testing.T) {
-	// /126 -> /128 => 4 subnets (endereços individuais)
+	// /126 -> /128 => 4 subnets (individual addresses)
 	got, err := splitIntoSubnets("2001:db8::/126", 128)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -183,7 +182,7 @@ func TestProcessNmapResults_IPv6KeyFormatting(t *testing.T) {
 		t.Fatalf("unexpected host counts up=%d down=%d", up, down)
 	}
 
-	// net.JoinHostPort para IPv6 adiciona colchetes.
+	// net.JoinHostPort for IPv6 adds brackets.
 	if _, ok := got["[2001:db8::1]:443/tcp"]; !ok {
 		t.Fatalf("expected key [2001:db8::1]:443/tcp, got %v", got)
 	}
@@ -227,6 +226,7 @@ func TestCategorizeError(t *testing.T) {
 }
 
 type errf string
+
 func (e errf) Error() string { return string(e) }
 
 // --- createNmapScanner sanity (does not run nmap) ---

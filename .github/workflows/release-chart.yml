@@ -27,7 +27,6 @@ jobs:
         uses: azure/setup-helm@v4
         with:
           version: v3.18.5
-
       - name: Install yq
         uses: mikefarah/yq@v4
 

@@ -1,4 +1,4 @@
-name: Docker Publish
+name: Container Publish
 
 on:
   push:
@@ -67,6 +67,11 @@ jobs:
             # latest on default branch only
             type=raw,value=latest,enable={{is_default_branch}}
 
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -82,3 +87,10 @@ jobs:
             REVISION=${{ github.sha }}
             BRANCH=${{ github.ref_name }}
             DATE=${{ github.event.head_commit.timestamp || github.run_id }}
+
+      - name: SBOM (syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          format: cyclonedx-json
+          artifact-name: sbom-image-${{ github.ref_name }}.json

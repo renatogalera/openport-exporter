@@ -2,20 +2,24 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "openport-exporter.fullname" . }}
-  {{- if .Values.service.labels }}
   labels:
-    {{- toYaml "openport-exporter.labels" . | nindent 4 }}
-  {{- end }}
-  {{- if .Values.service.annotations }}
+    {{- include "openport-exporter.labels" . | nindent 4 }}
+    {{- with .Values.service.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.service.annotations }}
   annotations:
-    {{- toYaml .Values.service.annotations | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   type: {{ .Values.service.type }}
+  selector:
+    {{- include "openport-exporter.selectorLabels" . | nindent 4 }}
   ports:
     - name: metrics
       port: {{ .Values.service.port }}
-      targetPort: {{ .Values.config.server.port }}
-  selector:
-    app.kubernetes.io/name: {{ include "openport-exporter.name" . }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
+      targetPort: metrics
+      protocol: TCP
+      {{- if and (eq .Values.service.type "NodePort") .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}

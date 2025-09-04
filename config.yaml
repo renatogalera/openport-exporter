@@ -1,80 +1,202 @@
-############################################
-# OpenPort Exporter - Application Config   #
-############################################
+#################################################################################################
+# OpenPort Exporter - Application Configuration                                                   #
+#                                                                                                #
+# This file defines runtime behavior for the OpenPort Exporter.                                   #
+# All parameters are hot‑reloadable unless explicitly noted (see README > Hot Configuration).     #
+# Keys marked (RESTART REQUIRED) require a full process restart to take effect.                   #
+# Duration fields accept Go duration syntax (e.g. 30m, 4h, 15s).                                  #
+# Untyped numeric timeouts expressed in seconds are explicitly labeled below.                    #
+# Avoid removing keys you do not override—keep them for future audit / clarity.                  #
+#                                                                                                #
+# SECURITY / OPERATIONS NOTES                                                                    #
+# - Limit exposed attack surface: restrict Tasks API via auth + CIDR allow list.                 #
+# - Control cardinality: large targets * wide port ranges can explode resource usage.            #
+# - Principle of least privilege: run with only CAP_NET_RAW when SYN scan enabled.               #
+# - Trusted proxies: only configure if you're behind an ingress / load balancer you trust.       #
+# - series_limit: guardrail for (estimated IPs * ports) per on‑demand scan request.              #
+#                                                                                                #
+# Change Management Recommendation                                                                #
+# Track revisions to this file in Git; include change rationale in commit messages.              #
+#################################################################################################
 
-# Server configuration
+############################
+# Server configuration      #
+############################
+# port: (RESTART REQUIRED) TCP listen port. Overridden by flag/env LISTEN_PORT if provided.
+# trusted_proxies_cidrs: List of CIDRs considered trusted to supply an authentic X-Forwarded-For
+#   chain. Only needed when sitting behind reverse proxies / ingress. Leave empty otherwise.
 server:
-  # TCP port where the HTTP server listens (/-/healthy, /-/ready, /metrics)
   port: 9919
+  trusted_proxies_cidrs: []
 
-# Scanning configuration
+############################
+# Scanning (Global Defaults) #
+############################
+# interval: Default global scan interval (seconds) applied when a background target lacks its own interval.
+#           Values < 600 are rejected and internally coerced to 10800 (3h) for safety.
+# port_range: Default fallback port range when a target's port_range is empty. Supports comma list + ranges.
+# max_cidr_size: Largest subnet prefix length allowed before automatic splitting (e.g. /16 split into /24 if set to 24).
+# timeout: Per-subnet scan timeout in seconds (hard stop for Nmap on that subnet unit).
+# duration_metrics: When true, also exports a histogram and gauge for scan durations.
+# disable_dns_resolution: Equivalent to "-n" in Nmap (skip reverse DNS) for speed / privacy.
+# udp_scan: Force UDP scanning mode globally (Task API can still specify protocol). Off by default due to cost.
+# use_syn_scan: If true, use SYN (half-open) scans—requires CAP_NET_RAW. If false, fallback to connect() scans.
+# rate_limit, task_queue_size, worker_count: Legacy fallbacks. The preferred tuning resides under scheduler.*. Used
+#   only if the corresponding scheduler value is unset or <= 0. Keep defaults for backward compatibility.
+# min_rate: Minimum packet rate to try (Nmap --min-rate). Raising improves speed but increases network load.
+# max_rate: Upper bound rate (0 = unlimited). Use to cap aggressive min_rate settings.
+# min_parallelism: Hints Nmap to maintain at least this number of probes in flight (expert tuning—avoid large changes).
+# max_retries: Nmap retransmission attempts; lowering reduces scan time but increases false negatives.
+# host_timeout: Abort individual host scans after this many seconds (0 disables). Helps bound long/slow hosts.
+# scan_delay / max_scan_delay: Inter-packet pacing (milliseconds). Normally 0 for performance.
+# initial_rtt_timeout / max_rtt_timeout / min_rtt_timeout: Fine-grained RTT tuning. Leave 0 unless diagnosing latency issues.
+# disable_host_discovery: If true ("-Pn"), skip host discovery and assume hosts are up. Faster but may waste probes on dead hosts.
 scanning:
-  # Interval between background scans (seconds)
   interval: 10800
-  # Port selection for background scans
   port_range: "1-65535"
-  # Max subnet mask when splitting large CIDRs for parallel scanning
-  max_cidr_size: 24
-  # Hard timeout per subnet scan (seconds)
+  max_cidr_size: 16
   timeout: 3600
-  # Export scan duration metrics
-  duration_metrics: true
-  # Disable reverse DNS resolution in nmap
+  duration_metrics: false
   disable_dns_resolution: true
-  # When true, perform UDP scans (exclusive from TCP in a given task)
   udp_scan: false
-  # Use TCP SYN scan (requires CAP_NET_RAW). If false, use TCP connect() scan.
   use_syn_scan: true
-
-  # Queue and workers
-  rate_limit: 60           # Legacy field (not used by code paths currently)
+  # Legacy worker knobs (prefer scheduler.*)
+  rate_limit: 60
   task_queue_size: 100
   worker_count: 5
-
-  # Nmap performance tuning
-  min_rate: 1000           # packets/sec minimum
-  max_rate: 0              # 0 = unlimited
+  min_rate: 1000
+  max_rate: 0
   min_parallelism: 1000
   max_retries: 6
-  host_timeout: 300        # seconds
-  scan_delay: 0            # milliseconds
-  max_scan_delay: 0        # milliseconds
-  initial_rtt_timeout: 0   # milliseconds
-  max_rtt_timeout: 0       # milliseconds
-  min_rtt_timeout: 0       # milliseconds
-  disable_host_discovery: true  # -Pn
+  host_timeout: 300
+  scan_delay: 0
+  max_scan_delay: 0
+  initial_rtt_timeout: 0
+  max_rtt_timeout: 0
+  min_rtt_timeout: 0
+  disable_host_discovery: true
 
-# Optional basic authentication for the main /metrics endpoint
-auth:
-  basic:
-    username: ""
-    password: ""
+# Authentication for Tasks API (optional)
+# Empty values disable the respective auth method. If both bearer_token and basic credentials are set, a client
+# may use either (logical OR). DO NOT commit real secrets in version control for production deployments.
+# auth:
+#   bearer_token: "" 
+#   basic:
+#     username: ""
+#     password: ""
 
-# Targets set to be scanned continuously by the background workers
-targets:
-  - "192.168.1.0/24"
-  - "10.0.0.0/24"
+# Background targets (module is currently ignored by background scheduler)
+# Each entry defines a recurring background scan job:
+# - name: Human-friendly identifier (unique). Appears in metric labels ("target").
+# - target: IP or CIDR (IPv4 / IPv6). Large CIDRs will be subdivided based on scanning.max_cidr_size.
+# - port_range: Comma/range syntax. Keep tight to control noise and runtime.
+# - protocol: "tcp" or "udp" (case-insensitive; default tcp if omitted).
+# - interval: Per-target cadence (overrides scanning.interval). Accepts Go duration syntax.
+# - module: (Currently ignored for background; reserved for future module preset application.)
+# targets:
+#   - name: "dmz_ssh"
+#     target: "192.168.1.0/24"
+#     port_range: "22"
+#     protocol: "tcp"
+#     interval: "1h"
+#     module: "tcp_syn_fast"
+#   - name: "branch_web"
+#     target: "10.0.0.0/24"
+#     port_range: "80,443"
+#     protocol: "tcp"
+#     interval: "2h"
+#     module: "tcp_connect_safe"
 
-# Optional presets (modules) used by /probe endpoint
-prober:
-  modules:
-    tcp_syn_fast:
-      protocol: tcp
-      ports: "22,80,443,1000-1024"
-      use_syn_scan: true
-      min_rate: 2000
-      min_parallelism: 1000
-      max_retries: 3
-      host_timeout: 180
-      disable_host_discovery: true
-    tcp_connect_safe:
-      protocol: tcp
-      ports: "22,80,443"
-      use_syn_scan: false
-      max_retries: 2
-      host_timeout: 120
-    udp_basic:
-      protocol: udp
-      ports: "53,123"
-      max_retries: 3
-      host_timeout: 120
+# Optional allowlisted detailed per-port series (bounded by budget)
+# Enables low-cardinality, strictly controlled detailed port openness metrics per (alias, ip, port, protocol).
+# Only enable if you need per-host critical port alerting—disable to further minimize cardinality.
+# Fields:
+#   enabled: Gate for feature activation.
+#   series_budget: Hard ceiling on concurrently exposed per-port detail series. Exceeding creates drop events.
+#   ttl: Time-to-live for a detail series without reconfirmation before eviction.
+#   include_alias/include_ip: Control label presence (reduce by disabling IP if alias grouping is enough).
+#   targets: Explicit allowlist of which network objects/ports may emit detail series. Alias must be unique; invalid
+#            entries abort config load (fail-fast).
+# background_details:
+#   enabled: true
+#   series_budget: 2000
+#   ttl: "30m"
+#   include_alias: true
+#   include_ip: true
+#   targets:
+#   - alias: "ssh-bastion-primary"
+#     cidr: "203.0.113.10/32"
+#     protocol: "tcp"
+#     ports: ["22"]
+#   IPv4 — All addresses (use with caution!)
+#   - alias: "all-v4"
+#     cidr: "0.0.0.0/0"
+#     protocol: "tcp"
+#     ports: ["1-65535"]
+#   IPv6 — All addresses (use with caution!)
+#   - alias: "all-v6"
+#     cidr: "::/0"
+#     protocol: "tcp"
+#     ports: ["1-65535"]
+
+############################
+# Tasks API Policy          #
+############################
+# client_allow_cidrs: CIDR allow list controlling which source IPs (or trusted proxy forwarded IPs) may call the Tasks API.
+# rate_limit_rps / rate_burst: Token bucket guarding overall and per-IP request rate (applies to Tasks API endpoints only).
+# max_concurrent: Upper bound of in-flight task creation requests (throttles fan-out pressure on scheduler).
+# series_limit: Guardrail for (estimated total IPs * number of ports) per submitted scan request. Requests exceeding
+#               limit are rejected ("series limit exceeded") to protect memory + metric cardinality.
+policy:
+  client_allow_cidrs: ["127.0.0.0/8"]
+  rate_limit_rps: 2.0
+  rate_burst: 2
+  max_concurrent: 2
+  series_limit: 250000
+
+############################
+# Scheduler (Task + Background) #
+############################
+# worker_count: Number of worker goroutines executing scan subtasks. Increase cautiously—Nmap concurrency per process
+#               + network constraints still apply. (RESTART REQUIRED to shrink resource spikes fully.)
+# task_queue_size: Buffered queue capacity for pending scan subtasks (fan-out). Balance latency vs memory.
+# default_timeout: Default per-task scan timeout (Go duration) when a request omits timeout.
+# default_max_cidr_size: Subnet split threshold for Task API requests (overridden per request via max_cidr_size).
+# dedupe_ttl: Window in which identical dedupe_key replays return the original task_id (idempotency / avoidance).
+# task_gc_max: Max retained finished task records (beyond this oldest are purged) to bound memory.
+# task_gc_max_age: Age threshold after which finished tasks are eligible for GC regardless of count.
+# module_limits: Per-module concurrency ceilings (0 = unlimited). Use to protect upstream systems from saturation
+#                when different scan presets target different infrastructure tiers.
+scheduler:
+  worker_count: 5
+  task_queue_size: 100
+  default_timeout: "30m"
+  default_max_cidr_size: 24
+  dedupe_ttl: "15m"
+  task_gc_max: 10000
+  task_gc_max_age: "24h"
+  module_limits:
+    default: 0
+    tcp_syn_fast: 2
+
+############################
+# Module Presets (Task API)  #
+############################
+# Each module defines a reusable scan profile applied only when a Task request specifies "module".
+# Unset fields inherit from global scanning.* defaults. Use modules to standardize performance vs depth trade-offs.
+# Common use cases: fast SYN baseline vs slower, exhaustive connect() validation, or different port bundles.
+modules:
+  tcp_syn_fast:
+    protocol: tcp 
+    use_syn_scan: true
+    min_rate: 2000
+    min_parallelism: 1000
+    max_retries: 3 
+    host_timeout: 180
+    disable_host_discovery: true
+  tcp_connect_safe:
+    protocol: tcp
+    ports: "22,80,443"
+    use_syn_scan: false
+    max_retries: 2
+    host_timeout: 120
