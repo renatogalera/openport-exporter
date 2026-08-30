@@ -10,12 +10,12 @@ env:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Extract chart version from tag
         id: v
@@ -24,29 +24,32 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
-          version: v3.18.5
-      - name: Install yq
-        uses: mikefarah/yq@v4
+          version: v4.2.4
+      - name: Read chart version
+        id: chart-version
+        uses: mikefarah/yq@c14f446382944492701b16c1ddb48bb9dbe683e3 # v4.53.6
+        with:
+          cmd: yq '.version' '${{ env.CHART_DIR }}/Chart.yaml'
 
       - name: Validate Chart.yaml version == tag
         env:
+          CHART_VERSION: ${{ steps.chart-version.outputs.result }}
           VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -euo pipefail
           FILE="$CHART_DIR/Chart.yaml"
           test -f "$FILE"
-          CHART_VER="$(yq '.version' "$FILE")"
-          if [ "$CHART_VER" != "$VERSION" ]; then
-            echo "Chart.yaml version ($CHART_VER) != tag ($VERSION)"
+          if [ "$CHART_VERSION" != "$VERSION" ]; then
+            echo "Chart.yaml version ($CHART_VERSION) != tag ($VERSION)"
             exit 1
           fi
           echo "OK: Chart.yaml version matches tag $VERSION"
 
       - name: Lint & Package
         run: |
-          helm dependency build "$CHART_DIR" || true
+          helm dependency build "$CHART_DIR"
           helm lint "$CHART_DIR"
           helm package "$CHART_DIR" --destination dist
 

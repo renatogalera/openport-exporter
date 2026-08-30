@@ -19,7 +19,8 @@ builds:
     binary: openport-exporter
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 # Linux packages (.deb/.rpm) via nfpm
@@ -38,7 +39,7 @@ nfpms:
       - nmap
     dependencies:
       - nmap
-    builds:
+    ids:
       - main
     formats:
       - deb

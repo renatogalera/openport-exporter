@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -13,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Ullaakut/nmap/v3"
+	"github.com/Ullaakut/nmap/v4"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/renatogalera/openport-exporter/internal/allowlist"
@@ -252,7 +253,7 @@ func worker(
 				taskMgr.Start(task.TaskID, cancel)
 				metricsCollector.SetSchedulerRunning(taskMgr.RunningCount())
 			}
-			openCount, up, down, dur, err := scanTarget(
+			openCount, up, down, err := scanTarget(
 				scanCtx,
 				task,
 				&cfg,
@@ -285,7 +286,13 @@ func worker(
 						_ = reEnqueue(retryTask, "low")
 					}(next)
 				} else {
-					done, outcome, elapsed := taskMgr.SubtaskDone(task.TaskID, up, down, openCount, err)
+					done, outcome, elapsed := taskMgr.SubtaskDone(
+						task.TaskID,
+						up,
+						down,
+						openCount,
+						err,
+					)
 					metricsCollector.SetSchedulerRunning(taskMgr.RunningCount())
 					if done {
 						mod := task.Module
@@ -302,8 +309,6 @@ func worker(
 					}
 				}
 			}
-			// Update scheduler running metric approximate via semaphore occupancy later (optional)
-			_ = dur
 		}()
 
 		metricsCollector.UpdateTaskQueueSize(len(taskQueue))
@@ -326,7 +331,7 @@ func scanTarget(
 	metricsCollector *metricspkg.Collector,
 	log *slog.Logger,
 	allowCache *allowlist.Cache,
-) (int, int, int, float64, error) {
+) (int, int, int, error) {
 	scanSource := detailedSourceForTask(task)
 	scanSequence := task.ScanSequence
 	if scanSequence == 0 {
@@ -336,7 +341,7 @@ func scanTarget(
 	scannerInstance, err := createNmapScannerFn(task, cfg, ctx)
 	if err != nil {
 		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol, "scanner_creation")
-		return 0, 0, 0, 0, fmt.Errorf("failed to create Nmap scanner: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to create Nmap scanner: %w", err)
 	}
 
 	startTime := time.Now()
@@ -347,12 +352,12 @@ func scanTarget(
 		if errorType == "timeout" {
 			metricsCollector.IncrementScanTimeout(task.Target, task.PortRange, task.Protocol)
 		}
-		return 0, 0, 0, 0, fmt.Errorf("failed to run Nmap scan: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to run Nmap scan: %w", err)
 	}
 	metricsCollector.IncrementScanSuccess(task.Target, task.PortRange, task.Protocol)
 	completedAt := time.Now()
-	if warnings != nil && len(*warnings) > 0 {
-		log.Warn("Scan warnings", "warnings", *warnings)
+	if len(warnings) > 0 {
+		log.Warn("Scan warnings", "warnings", warnings)
 	}
 
 	duration := time.Since(startTime).Seconds()
@@ -412,7 +417,7 @@ func scanTarget(
 		)
 	}
 
-	return len(newResults), hostsUp, hostsDown, duration, nil
+	return len(newResults), hostsUp, hostsDown, nil
 }
 
 func detailedSourceForTask(task ScanTask) metricspkg.DetailedSource {
@@ -490,39 +495,24 @@ func parseK(k string) (ip, port, proto string) {
 	return k, "", proto
 }
 
-// scanResult holds the result of an Nmap scan operation.
-type scanResult struct {
-	result   *nmap.Run
-	warnings *[]string
-	err      error
-}
-
 // runNmapScan executes an Nmap scan with context cancellation support.
 func runNmapScan(
 	ctx context.Context,
 	scanner *nmap.Scanner,
 	task ScanTask,
 	log *slog.Logger,
-) (*nmap.Run, *[]string, error) {
-	resultCh := make(chan scanResult, 1)
-	go func() {
-		result, warnings, err := scanner.Run()
-		resultCh <- scanResult{
-			result:   result,
-			warnings: warnings,
-			err:      err,
+) (*nmap.Run, []string, error) {
+	result, err := scanner.Run(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			log.Warn("nmap scan interrupted", "target", task.Target, "error", ctx.Err())
 		}
-	}()
-	select {
-	case <-ctx.Done():
-		log.Warn("nmap scan timed out", "target", task.Target)
-		return nil, nil, fmt.Errorf("nmap scan timed out: %w", ctx.Err())
-	case res := <-resultCh:
-		if res.err != nil {
-			return nil, nil, fmt.Errorf("unable to run Nmap scan: %w", res.err)
-		}
-		return res.result, res.warnings, nil
+		return nil, nil, fmt.Errorf("unable to run Nmap scan: %w", err)
 	}
+	if result == nil {
+		return nil, nil, errors.New("unable to run Nmap scan: empty result")
+	}
+	return result, result.Warnings(), nil
 }
 
 // processNmapResults processes Nmap scan results and returns open ports, host counts.
@@ -614,8 +604,8 @@ func RunImmediateScan(
 		if err != nil {
 			return nil, 0, 0, 0, err
 		}
-		if warnings != nil && len(*warnings) > 0 {
-			log.Warn("probe warnings", "warnings", *warnings)
+		if len(warnings) > 0 {
+			log.Warn("probe warnings", "warnings", warnings)
 		}
 
 		r, up, down := processNmapResults(run, t, log)
@@ -631,7 +621,7 @@ func RunImmediateScan(
 }
 
 // createNmapScanner builds an Nmap scanner with exclusive TCP or UDP mode (never both).
-func createNmapScanner(task ScanTask, cfg *cfgpkg.Config, ctx context.Context) (*nmap.Scanner, error) {
+func createNmapScanner(task ScanTask, cfg *cfgpkg.Config, _ context.Context) (*nmap.Scanner, error) {
 	scannerOptions := []nmap.Option{
 		nmap.WithTargets(task.Target),
 		nmap.WithPorts(task.PortRange),
@@ -703,7 +693,7 @@ func createNmapScanner(task ScanTask, cfg *cfgpkg.Config, ctx context.Context) (
 		scannerOptions = append(scannerOptions, nmap.WithSkipHostDiscovery())
 	}
 
-	sc, err := nmap.NewScanner(ctx, scannerOptions...)
+	sc, err := nmap.NewScanner(scannerOptions...)
 	if err != nil {
 		return nil, fmt.Errorf("create nmap scanner: %w", err)
 	}
@@ -817,14 +807,21 @@ func CreateTargetKeyFor(ipRange, portRange, proto string) string {
 
 // categorizeError categorizes scan errors into types for metrics labeling.
 func categorizeError(err error) string {
-	if err != nil {
-		le := strings.ToLower(err.Error())
-		if strings.Contains(le, "timeout") {
-			return "timeout"
-		}
-		if strings.Contains(le, "permission") {
-			return "permission"
-		}
+	if err == nil {
+		return "other"
+	}
+	if errors.Is(err, nmap.ErrScanTimeout) || errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, nmap.ErrRequiresRoot) {
+		return "permission"
+	}
+	le := strings.ToLower(err.Error())
+	if strings.Contains(le, "timeout") {
+		return "timeout"
+	}
+	if strings.Contains(le, "permission") {
+		return "permission"
 	}
 	return "other"
 }

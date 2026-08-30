@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ullaakut/nmap/v3"
+	"github.com/Ullaakut/nmap/v4"
 
 	cfgpkg "github.com/renatogalera/openport-exporter/internal/config"
 	metricspkg "github.com/renatogalera/openport-exporter/internal/metrics"
@@ -22,7 +22,7 @@ func TestWorkers_ModuleLimitEnforced(t *testing.T) {
 	var mu sync.Mutex
 	var inCS, maxCS int
 	oldRun := runNmapFn
-	runNmapFn = func(ctx context.Context, _ *nmap.Scanner, _ ScanTask, _ *slog.Logger) (*nmap.Run, *[]string, error) {
+	runNmapFn = func(ctx context.Context, _ *nmap.Scanner, _ ScanTask, _ *slog.Logger) (*nmap.Run, []string, error) {
 		mu.Lock()
 		inCS++
 		if inCS > maxCS {

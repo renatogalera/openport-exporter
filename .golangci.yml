@@ -55,8 +55,9 @@ formatters:
     - golines
   settings:
     gofumpt:
-      extra-rules: true
       module-path: github.com/renatogalera/openport-exporter
+      extra:
+        group-params: true
     goimports:
       local-prefixes:
         - github.com/renatogalera/openport-exporter

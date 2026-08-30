@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Ullaakut/nmap/v3"
+	"github.com/Ullaakut/nmap/v4"
 
 	cfgpkg "github.com/renatogalera/openport-exporter/internal/config"
 	metricspkg "github.com/renatogalera/openport-exporter/internal/metrics"
@@ -22,7 +22,7 @@ func TestWorker_CancelRunningTask(t *testing.T) {
 	// Stub run to block until context is cancelled
 	old := runNmapFn
 	var started int32
-	runNmapFn = func(ctx context.Context, _ *nmap.Scanner, _ ScanTask, _ *slog.Logger) (*nmap.Run, *[]string, error) {
+	runNmapFn = func(ctx context.Context, _ *nmap.Scanner, _ ScanTask, _ *slog.Logger) (*nmap.Run, []string, error) {
 		atomic.StoreInt32(&started, 1)
 		<-ctx.Done()
 		return nil, nil, ctx.Err()

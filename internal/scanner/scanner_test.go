@@ -13,7 +13,7 @@ import (
 	cfgpkg "github.com/renatogalera/openport-exporter/internal/config"
 	metricspkg "github.com/renatogalera/openport-exporter/internal/metrics"
 
-	"github.com/Ullaakut/nmap/v3"
+	"github.com/Ullaakut/nmap/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
@@ -287,7 +287,7 @@ func TestScanTargetOpenThenClosedReconcilesDetailedSeriesImmediately(t *testing.
 		return result, nil
 	})
 
-	openCount, _, _, _, err := scanTarget(
+	openCount, _, _, err := scanTarget(
 		context.Background(),
 		task,
 		cfg,
@@ -305,7 +305,7 @@ func TestScanTargetOpenThenClosedReconcilesDetailedSeriesImmediately(t *testing.
 		"alias": "ssh-bastion", "ip": "192.168.1.10", "port": "22", "protocol": "tcp",
 	}, 1)
 
-	openCount, _, _, _, err = scanTarget(
+	openCount, _, _, err = scanTarget(
 		context.Background(),
 		task,
 		cfg,
@@ -358,7 +358,7 @@ func TestScanTargetErrorPreservesLastSuccessfulDetailedState(t *testing.T) {
 		return nil, errors.New("timeout while scanning")
 	})
 
-	if _, _, _, _, err := scanTarget(
+	if _, _, _, err := scanTarget(
 		context.Background(),
 		task,
 		cfg,
@@ -368,7 +368,7 @@ func TestScanTargetErrorPreservesLastSuccessfulDetailedState(t *testing.T) {
 	); err != nil {
 		t.Fatalf("initial scan failed: %v", err)
 	}
-	if _, _, _, _, err := scanTarget(
+	if _, _, _, err := scanTarget(
 		context.Background(),
 		task,
 		cfg,
@@ -409,7 +409,7 @@ func TestQueuedScheduledScanFromOldGenerationCannotRecreateDetails(t *testing.T)
 		return nmapResultWithPortState("open"), nil
 	})
 
-	openCount, _, _, _, err := scanTarget(
+	openCount, _, _, err := scanTarget(
 		context.Background(), task, cfg, collector, silentLogger(), cache,
 	)
 	if err != nil || openCount != 1 {
@@ -439,7 +439,7 @@ func installScannerTestHooks(t *testing.T, next func() (*nmap.Run, error)) {
 		*nmap.Scanner,
 		ScanTask,
 		*slog.Logger,
-	) (*nmap.Run, *[]string, error) {
+	) (*nmap.Run, []string, error) {
 		result, err := next()
 		return result, nil, err
 	}
@@ -543,6 +543,12 @@ func TestCreateTargetKey_LowercasesProto(t *testing.T) {
 func TestCategorizeError(t *testing.T) {
 	if got := categorizeError(nil); got != "other" {
 		t.Fatalf("nil -> other, got %q", got)
+	}
+	if got := categorizeError(nmap.ErrScanTimeout); got != "timeout" {
+		t.Fatalf("nmap timeout -> timeout, got %q", got)
+	}
+	if got := categorizeError(nmap.ErrRequiresRoot); got != "permission" {
+		t.Fatalf("nmap root requirement -> permission, got %q", got)
 	}
 	if got := categorizeError(errf("SOMETHING timeout occurred")); got != "timeout" {
 		t.Fatalf("timeout string -> timeout, got %q", got)

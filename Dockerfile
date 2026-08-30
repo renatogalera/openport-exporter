@@ -1,5 +1,5 @@
 # Stage 1: Build the application
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS builder
 ARG VERSION=""
 ARG REVISION=""
 ARG BRANCH=""
@@ -29,7 +29,7 @@ RUN go build -ldflags "-s -w \
     -o openport-exporter .
 
 # Stage 2: Create the final image with the binary
-FROM debian:bookworm-slim
+FROM debian:bookworm-20260824-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 # Install necessary packages including libpcap-dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
