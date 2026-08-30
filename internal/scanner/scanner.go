@@ -34,6 +34,8 @@ type ScanTask struct {
 	TimeoutOverrideSeconds int
 	Attempts               int
 	MaxAttempts            int
+	DetailGeneration       uint64
+	ScanSequence           uint64
 }
 
 // ModuleLimiter controls per-module concurrency using semaphore.Weighted.
@@ -87,6 +89,37 @@ func EnqueueScanTask(
 	target, portRange, protocol string,
 	maxCIDRSize int,
 ) error {
+	return enqueueScanTask(ctx, taskQueue, target, portRange, protocol, maxCIDRSize, 0)
+}
+
+// EnqueueScheduledScanTask stamps every shard with the detail generation that
+// defined its source topology. A queued task from an older topology cannot
+// recreate either aggregate lifecycle state or invalid detail ownership.
+func EnqueueScheduledScanTask(
+	ctx context.Context,
+	taskQueue chan ScanTask,
+	target, portRange, protocol string,
+	maxCIDRSize int,
+	detailGeneration uint64,
+) error {
+	return enqueueScanTask(
+		ctx,
+		taskQueue,
+		target,
+		portRange,
+		protocol,
+		maxCIDRSize,
+		detailGeneration,
+	)
+}
+
+func enqueueScanTask(
+	ctx context.Context,
+	taskQueue chan ScanTask,
+	target, portRange, protocol string,
+	maxCIDRSize int,
+	detailGeneration uint64,
+) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("context done: %w", err)
 	}
@@ -99,7 +132,12 @@ func EnqueueScanTask(
 			return fmt.Errorf("context done: %w", err)
 		}
 		select {
-		case taskQueue <- ScanTask{Target: subnet, PortRange: portRange, Protocol: protocol}:
+		case taskQueue <- ScanTask{
+			Target:           subnet,
+			PortRange:        portRange,
+			Protocol:         protocol,
+			DetailGeneration: detailGeneration,
+		}:
 			// ok
 		default:
 			return fmt.Errorf("worker queue is full")
@@ -150,25 +188,28 @@ func worker(
 		}
 		// Acquire semaphore token to bound concurrency
 		semaphore <- struct{}{}
+		scanSource := detailedSourceForTask(task)
+		task.ScanSequence = metricsCollector.BeginScan(scanSource)
 
-		// Run the scan synchronously in this goroutine
-		log.Debug(
-			"Worker picked up a task",
-			"target",
-			task.Target,
-			"portRange",
-			task.PortRange,
-			"protocol",
-			task.Protocol,
-		)
 		func() {
+			defer metricsCollector.EndScan(scanSource, task.ScanSequence)
 			defer func() {
 				if r := recover(); r != nil {
 					log.Error("Recovered from panic", "task", task, "panic", r)
 				}
 			}()
+			// Run the scan synchronously in this goroutine.
+			log.Debug(
+				"Worker picked up a task",
+				"target",
+				task.Target,
+				"portRange",
+				task.PortRange,
+				"protocol",
+				task.Protocol,
+			)
 			// Snapshot config for this task
-			cfg := mgr.Get()
+			cfg, allowCache := mgr.GetScanSnapshot()
 			// Apply module overrides if present
 			if strings.TrimSpace(task.Module) != "" {
 				if mod, ok := cfg.Modules[task.Module]; ok {
@@ -197,7 +238,6 @@ func worker(
 					}
 				}
 			}
-			allowCache := mgr.GetAllowlistCache()
 			timeout := time.Duration(cfg.Scanning.Timeout) * time.Second
 			if task.TimeoutOverrideSeconds > 0 {
 				timeout = time.Duration(task.TimeoutOverrideSeconds) * time.Second
@@ -238,6 +278,7 @@ func worker(
 					// Backoff & retry once (or configured attempts)
 					next := task
 					next.Attempts++
+					next.ScanSequence = 0
 					// schedule re-enqueue after short jitter
 					go func(retryTask ScanTask) {
 						time.Sleep(time.Duration(250+rand.IntN(500)) * time.Millisecond)
@@ -273,7 +314,10 @@ func worker(
 
 // scanTarget executes a single scan task and updates metrics with the results.
 // hookable run function for tests
-var runNmapFn = runNmapScan
+var (
+	createNmapScannerFn = createNmapScanner
+	runNmapFn           = runNmapScan
+)
 
 func scanTarget(
 	ctx context.Context,
@@ -283,7 +327,13 @@ func scanTarget(
 	log *slog.Logger,
 	allowCache *allowlist.Cache,
 ) (int, int, int, float64, error) {
-	scannerInstance, err := createNmapScanner(task, cfg, ctx)
+	scanSource := detailedSourceForTask(task)
+	scanSequence := task.ScanSequence
+	if scanSequence == 0 {
+		scanSequence = metricsCollector.BeginScan(scanSource)
+		defer metricsCollector.EndScan(scanSource, scanSequence)
+	}
+	scannerInstance, err := createNmapScannerFn(task, cfg, ctx)
 	if err != nil {
 		metricsCollector.IncrementScanFailure(task.Target, task.PortRange, task.Protocol, "scanner_creation")
 		return 0, 0, 0, 0, fmt.Errorf("failed to create Nmap scanner: %w", err)
@@ -300,14 +350,13 @@ func scanTarget(
 		return 0, 0, 0, 0, fmt.Errorf("failed to run Nmap scan: %w", err)
 	}
 	metricsCollector.IncrementScanSuccess(task.Target, task.PortRange, task.Protocol)
-	metricsCollector.SetLastScanTimestamp(task.Target, task.PortRange, task.Protocol, time.Now())
+	completedAt := time.Now()
 	if warnings != nil && len(*warnings) > 0 {
 		log.Warn("Scan warnings", "warnings", *warnings)
 	}
 
 	duration := time.Since(startTime).Seconds()
 	if cfg.Scanning.DurationMetrics {
-		metricsCollector.ObserveScanDuration(task.Target, task.PortRange, task.Protocol, duration)
 		metricsCollector.GetScanDurationHistogram().WithLabelValues(
 			task.Target,
 			task.PortRange,
@@ -319,32 +368,88 @@ func scanTarget(
 
 	newResults, hostsUp, hostsDown := processNmapResults(result, task, log)
 
-	// Aggregate metrics per (target,port_range,protocol)
-	metricsCollector.UpdateMetrics(createTargetKey(task.Target, task.PortRange, task.Protocol), newResults)
-	metricsCollector.UpdateHostCounts(task.Target, task.PortRange, task.Protocol, hostsUp, hostsDown)
-
-	// Background details (allowlisted & bounded)
-	if cfg.BackgroundDetails != nil && cfg.BackgroundDetails.Enabled && allowCache != nil {
-		seriesBudget := cfg.BackgroundDetails.SeriesBudget
-		for portKey := range newResults {
-			ip, port, proto := parseK(portKey) // "ip:port/proto"
-			if alias, ok := allowCache.Lookup(ip, port, proto); ok {
-				aliasLabel, ipLabel := buildDetailLabels(cfg.BackgroundDetails, alias, ip)
-				// Atomically check budget and add metric to prevent race conditions
-				if !metricsCollector.SetDetailedPortOpenWithBudget(
-					aliasLabel,
-					ipLabel,
-					port,
-					strings.ToLower(proto),
-					seriesBudget,
-				) {
-					metricsCollector.IncrementDroppedSeries()
-				}
-			}
+	// Aggregate metrics per (target,port_range,protocol) and detailed metrics are
+	// reconciled from the same authoritative successful result.
+	targetKey := createTargetKey(task.Target, task.PortRange, task.Protocol)
+	aggregateAccepted := false
+	lifecycleGeneration := cfg.DetailsRevision()
+	if task.DetailGeneration > 0 {
+		lifecycleGeneration = task.DetailGeneration
+	}
+	if cfg.BackgroundDetails != nil && cfg.BackgroundDetails.Enabled {
+		var detailedPorts []metricspkg.DetailedPort
+		if allowCache != nil {
+			detailedPorts = buildDetailedPorts(newResults, cfg.BackgroundDetails, allowCache)
 		}
+		_, aggregateAccepted = metricsCollector.UpdateMetricsAndDetailedPortsForScan(
+			targetKey,
+			newResults,
+			metricspkg.DetailedPortUpdate{
+				Ports:        detailedPorts,
+				Generation:   lifecycleGeneration,
+				ScanSequence: scanSequence,
+				Source:       scanSource,
+			},
+		)
+	} else {
+		aggregateAccepted = metricsCollector.UpdateMetricsForScanGeneration(
+			targetKey,
+			newResults,
+			scanSequence,
+			lifecycleGeneration,
+		)
+	}
+	if aggregateAccepted {
+		metricsCollector.UpdateLastResultMetricsForScan(
+			targetKey,
+			scanSequence,
+			lifecycleGeneration,
+			completedAt,
+			duration,
+			cfg.Scanning.DurationMetrics,
+			hostsUp,
+			hostsDown,
+		)
 	}
 
 	return len(newResults), hostsUp, hostsDown, duration, nil
+}
+
+func detailedSourceForTask(task ScanTask) metricspkg.DetailedSource {
+	return metricspkg.DetailedSource{
+		Target:    task.Target,
+		PortRange: task.PortRange,
+		Protocol:  task.Protocol,
+	}
+}
+
+func buildDetailedPorts(
+	results map[string]struct{},
+	cfg *cfgpkg.BackgroundDetailsConfig,
+	allowCache *allowlist.Cache,
+) []metricspkg.DetailedPort {
+	detailedPorts := make(map[metricspkg.DetailedPort]struct{})
+	for portKey := range results {
+		ip, port, proto := parseK(portKey)
+		alias, allowed := allowCache.Lookup(ip, port, proto)
+		if !allowed {
+			continue
+		}
+		aliasLabel, ipLabel := buildDetailLabels(cfg, alias, ip)
+		detail := metricspkg.DetailedPort{
+			Alias:    aliasLabel,
+			IP:       ipLabel,
+			Port:     port,
+			Protocol: strings.ToLower(proto),
+		}
+		detailedPorts[detail] = struct{}{}
+	}
+
+	ports := make([]metricspkg.DetailedPort, 0, len(detailedPorts))
+	for detail := range detailedPorts {
+		ports = append(ports, detail)
+	}
+	return ports
 }
 
 // buildDetailLabels centraliza a lógica de construção de labels para detalhes de portas.

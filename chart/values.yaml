@@ -202,7 +202,7 @@ config:
   # background_details:
   #   enabled: true
   #   series_budget: 2000
-  #   ttl: "30m"
+  #   ttl: "30m" # scheduled scan state uses at least 3x the target interval
   #   include_alias: true
   #   include_ip: true
   #   targets:

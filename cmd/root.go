@@ -131,6 +131,15 @@ func run() error {
 	}
 	mgr := cfgpkg.NewManager(cfg, settings.ConfigPath)
 	mc := openmetrics.NewMetricsCollector()
+	mc.ConfigureScanLifecycle(
+		cfg.DetailsRevision(),
+		cfg.BackgroundDetails != nil && cfg.BackgroundDetails.Enabled,
+		detailedSeriesBudget(cfg.BackgroundDetails),
+		true,
+		detailedSourceTTLRules(cfg),
+		scheduledTargetTTLs(cfg),
+		mgr.GetTTL(),
+	)
 	exporter := collectors.NewExporter(mc, logger)
 
 	// Background pipeline
@@ -149,9 +158,17 @@ func run() error {
 	mgr.SetOnReload(func(old, newCfg *cfgpkg.Config) {
 		oldTTL := cfgpkg.TTLForConfig(old)
 		newTTL := cfgpkg.TTLForConfig(newCfg)
+		mc.ConfigureScanLifecycle(
+			newCfg.DetailsRevision(),
+			newCfg.BackgroundDetails != nil && newCfg.BackgroundDetails.Enabled,
+			detailedSeriesBudget(newCfg.BackgroundDetails),
+			cfgpkg.DetailedSeriesDefinitionChanged(old, newCfg),
+			detailedSourceTTLRules(newCfg),
+			scheduledTargetTTLs(newCfg),
+			newTTL,
+		)
 
 		if newTTL != oldTTL {
-			mc.SetSweeperTTL(newTTL)
 			logger.Info("sweeper TTL updated", "old_ttl", oldTTL.String(), "new_ttl", newTTL.String())
 		}
 
@@ -236,26 +253,26 @@ func run() error {
 					}
 					// Compose key for CanScan
 					key := scanner.CreateTargetKeyFor(td.Target, td.PortRange, td.Protocol)
-					if mc.CanScan(key, d) {
+					if mc.CanScanForGeneration(key, d, c.DetailsRevision()) {
 						j := time.Duration(rand.IntN(250)) * time.Millisecond
 						select {
 						case <-ctx.Done():
 							return
 						case <-time.After(j):
 						}
-						if err := scanner.EnqueueScanTask(ctx, workerQueue, td.Target, td.PortRange, td.Protocol, c.Scanning.MaxCIDRSize); err != nil {
+						if err := scanner.EnqueueScheduledScanTask(
+							ctx,
+							workerQueue,
+							td.Target,
+							td.PortRange,
+							td.Protocol,
+							c.Scanning.MaxCIDRSize,
+							c.DetailsRevision(),
+						); err != nil {
 							mc.IncSchedulerEnqueueFailed()
 							continue
 						}
-						mc.RegisterScan(key)
-						mc.SetPerTargetTTL(
-							scanner.CreateTargetKeyFor(
-								td.Target,
-								td.PortRange,
-								td.Protocol,
-							),
-							3*d,
-						)
+						mc.RegisterScanForGeneration(key, c.DetailsRevision())
 					}
 				}
 			}
@@ -299,6 +316,47 @@ func run() error {
 	close(workerQueue)
 	logger.Info("server gracefully stopped")
 	return nil
+}
+
+func detailedSeriesBudget(details *cfgpkg.BackgroundDetailsConfig) int {
+	if details == nil {
+		return 0
+	}
+	return details.SeriesBudget
+}
+
+func detailedSourceTTLRules(cfg *cfgpkg.Config) []openmetrics.DetailedSourceTTLRule {
+	rules := make([]openmetrics.DetailedSourceTTLRule, 0, len(cfg.Targets))
+	for _, target := range cfg.Targets {
+		interval, err := time.ParseDuration(target.Interval)
+		if err != nil || interval <= 0 {
+			interval = cfg.GetScanIntervalDuration()
+		}
+		rules = append(rules, openmetrics.DetailedSourceTTLRule{
+			Source: openmetrics.DetailedSource{
+				Target:    target.Target,
+				PortRange: target.PortRange,
+				Protocol:  target.Protocol,
+			},
+			MinTTL: 3 * interval,
+		})
+	}
+	return rules
+}
+
+func scheduledTargetTTLs(cfg *cfgpkg.Config) map[string]time.Duration {
+	ttls := make(map[string]time.Duration, len(cfg.Targets))
+	for _, target := range cfg.Targets {
+		interval, err := time.ParseDuration(target.Interval)
+		if err != nil || interval <= 0 {
+			interval = cfg.GetScanIntervalDuration()
+		}
+		key := scanner.CreateTargetKeyFor(target.Target, target.PortRange, target.Protocol)
+		if ttl := 3 * interval; ttl > ttls[key] {
+			ttls[key] = ttl
+		}
+	}
+	return ttls
 }
 
 func Execute() error {

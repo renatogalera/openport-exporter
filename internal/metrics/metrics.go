@@ -3,6 +3,8 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"net/netip"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,8 +21,11 @@ type Collector struct {
 	scanTargetOpenPortsTotal *prometheus.GaugeVec
 	scanDuration             *prometheus.GaugeVec
 	// taskQueueSizeMetric removed in favor of schedulerQueueSize
-	scanTimeouts   *prometheus.CounterVec
-	scannedTargets sync.Map
+	scanTimeouts     *prometheus.CounterVec
+	scannedTargets   sync.Map
+	scheduledTargets sync.Map // map[string]*scheduledScanInfo
+	scanSequence     atomic.Uint64
+	inFlightScans    map[DetailedSource]map[uint64]struct{}
 
 	hostUpCount           *prometheus.GaugeVec
 	hostDownCount         *prometheus.GaugeVec
@@ -34,7 +39,14 @@ type Collector struct {
 	portOpen             *prometheus.GaugeVec // openport_port_open{alias,ip,port,protocol}
 	detailsSeriesDropped prometheus.Counter   // openport_details_series_dropped_total
 	detailedPortsMu      sync.Mutex
-	detailedPorts        map[string]time.Time // key: alias|ip|port|proto
+	detailedPorts        map[DetailedPort]*detailedSeriesInfo
+	detailedPortSources  map[DetailedSource]*detailedScanInfo
+	detailedSourceTTLs   []DetailedSourceTTLRule
+	detailedSeriesBudget int
+	detailedGeneration   uint64
+	detailedEnabled      bool
+	stateUpdateMu        sync.Mutex
+	now                  func() time.Time
 
 	sweeperTTL     atomic.Int64 // store as int64 nanoseconds
 	perTargetTTLMu sync.Mutex
@@ -145,7 +157,7 @@ func NewMetricsCollector() *Collector {
 			prometheus.GaugeOpts{
 				Namespace: metricNamespace,
 				Name:      "port_open",
-				Help:      "1 if (alias/ip,port,protocol) is open (background allowlisted details only).",
+				Help:      "Presence-only series with value 1 while an allowlisted port is open.",
 			},
 			[]string{"alias", "ip", "port", "protocol"},
 		),
@@ -153,10 +165,14 @@ func NewMetricsCollector() *Collector {
 			prometheus.CounterOpts{
 				Namespace: metricNamespace,
 				Name:      "details_series_dropped_total",
-				Help:      "Total number of background detail series drop events due to budget.",
+				Help:      "Total budget drop events, deduplicated within each scan result, including immediate evictions.",
 			},
 		),
-		detailedPorts: make(map[string]time.Time),
+		detailedPorts:       make(map[DetailedPort]*detailedSeriesInfo),
+		detailedPortSources: make(map[DetailedSource]*detailedScanInfo),
+		detailedEnabled:     true,
+		now:                 time.Now,
+		inFlightScans:       make(map[DetailedSource]map[uint64]struct{}),
 
 		schedulerQueueSize: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: metricNamespace,
@@ -261,6 +277,12 @@ func (mc *Collector) IncSchedulerEnqueueFailed() { mc.schedulerEnqueueFailed.Inc
 
 // SetSweeperTTL updates the TTL used by the sweeper (hot-reload).
 func (mc *Collector) SetSweeperTTL(ttl time.Duration) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+	mc.setSweeperTTL(ttl)
+}
+
+func (mc *Collector) setSweeperTTL(ttl time.Duration) {
 	if ttl <= 0 {
 		return
 	}
@@ -284,33 +306,318 @@ func (mc *Collector) getSweeperTTL() time.Duration {
 
 // ------------------- EXISTING METHODS -------------------
 
-// UpdateMetrics updates the metrics with new scan results (open ports).
+// UpdateMetrics updates the aggregate metrics with new scan results.
 func (mc *Collector) UpdateMetrics(targetKey string, newResults map[string]struct{}) {
+	mc.UpdateMetricsForScan(targetKey, newResults, 0)
+}
+
+// UpdateMetricsForScan updates aggregate state unless a newer scan of the same
+// source has already completed. A zero sequence preserves the legacy behavior
+// for callers that do not coordinate concurrent scans.
+func (mc *Collector) UpdateMetricsForScan(
+	targetKey string,
+	newResults map[string]struct{},
+	scanSequence uint64,
+) bool {
+	return mc.updateMetricsForScanGeneration(targetKey, newResults, scanSequence, 0, false)
+}
+
+// UpdateMetricsForScanGeneration additionally rejects results built from an
+// obsolete lifecycle generation.
+func (mc *Collector) UpdateMetricsForScanGeneration(
+	targetKey string,
+	newResults map[string]struct{},
+	scanSequence uint64,
+	generation uint64,
+) bool {
+	return mc.updateMetricsForScanGeneration(targetKey, newResults, scanSequence, generation, true)
+}
+
+func (mc *Collector) updateMetricsForScanGeneration(
+	targetKey string,
+	newResults map[string]struct{},
+	scanSequence uint64,
+	generation uint64,
+	enforceGeneration bool,
+) bool {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+	if enforceGeneration && generation != mc.detailedGeneration {
+		return false
+	}
+	return mc.updateMetrics(targetKey, newResults, scanSequence)
+}
+
+// DetailedPortUpdate contains the allowlisted detailed state derived from one
+// successful scan. Generation identifies the background-details configuration
+// used to build Ports. ScanSequence rejects an older concurrent result, while
+// Source provides a delimiter-safe ownership identity.
+type DetailedPortUpdate struct {
+	Ports        []DetailedPort
+	Generation   uint64
+	ScanSequence uint64
+	Source       DetailedSource
+}
+
+// UpdateMetricsAndDetailedPorts updates the aggregate scan state and reconciles
+// the presence-only detailed series owned by that scan target.
+//
+// A detailed series remains exposed while at least one current scan target
+// reports the same label set as open. This avoids deleting shared series when
+// scan ranges overlap or when include_ip=false collapses multiple IPs into one
+// label set. The return value is the number of unique series from this scan that
+// could not be admitted by the configured budget.
+func (mc *Collector) UpdateMetricsAndDetailedPorts(
+	targetKey string,
+	newResults map[string]struct{},
+	update DetailedPortUpdate,
+) int {
+	dropped, _ := mc.UpdateMetricsAndDetailedPortsForScan(targetKey, newResults, update)
+	return dropped
+}
+
+// UpdateMetricsAndDetailedPortsForScan also reports whether the aggregate
+// last-result snapshot accepted this observation. Detail reconciliation still
+// runs independently so an obsolete aggregate task cannot block a valid detail
+// generation.
+func (mc *Collector) UpdateMetricsAndDetailedPortsForScan(
+	targetKey string,
+	newResults map[string]struct{},
+	update DetailedPortUpdate,
+) (int, bool) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+
+	aggregateAccepted := false
+	if update.Generation == mc.detailedGeneration {
+		aggregateAccepted = mc.updateMetrics(targetKey, newResults, update.ScanSequence)
+	}
+	dropped := mc.reconcileDetailedPorts(targetKey, update)
+	if dropped > 0 {
+		mc.detailsSeriesDropped.Add(float64(dropped))
+	}
+	return dropped, aggregateAccepted
+}
+
+// ConfigureDetailedMetrics applies the active background-details generation and
+// budget. resetState must be true when labels or the allowlist changed because
+// existing series can no longer be validated against the new definition.
+func (mc *Collector) ConfigureDetailedMetrics(
+	generation uint64,
+	enabled bool,
+	budget int,
+	resetState bool,
+) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+
+	mc.detailedPortsMu.Lock()
+	defer mc.detailedPortsMu.Unlock()
+	mc.configureDetailedMetricsLocked(generation, enabled, budget, resetState)
+}
+
+func (mc *Collector) configureDetailedMetricsLocked(
+	generation uint64,
+	enabled bool,
+	budget int,
+	resetState bool,
+) bool {
+	if generation < mc.detailedGeneration {
+		return false
+	}
+	if resetState || !enabled {
+		mc.clearDetailedPortsLocked()
+	}
+	mc.detailedGeneration = generation
+	mc.detailedEnabled = enabled
+	mc.detailedSeriesBudget = budget
+	if !enabled {
+		return true
+	}
+
+	evicted := mc.enforceDetailedBudgetLocked(budget)
+	if evicted > 0 {
+		mc.detailsSeriesDropped.Add(float64(evicted))
+	}
+	return true
+}
+
+// ConfigureDetailedMetricsWithSourceTTLs installs the generation, lifecycle
+// policy, budget, and scheduled-source TTL rules as one atomic reload step.
+func (mc *Collector) ConfigureDetailedMetricsWithSourceTTLs(
+	generation uint64,
+	enabled bool,
+	budget int,
+	resetState bool,
+	rules []DetailedSourceTTLRule,
+) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+
+	mc.detailedPortsMu.Lock()
+	defer mc.detailedPortsMu.Unlock()
+
+	if !mc.configureDetailedMetricsLocked(generation, enabled, budget, resetState) {
+		return
+	}
+	mc.configureDetailedSourceTTLsLocked(rules)
+}
+
+// ConfigureScanLifecycle applies all reloadable state used by the scheduler,
+// aggregate sweeper, and detailed reconciler in one transaction.
+func (mc *Collector) ConfigureScanLifecycle(
+	generation uint64,
+	enabled bool,
+	budget int,
+	resetState bool,
+	rules []DetailedSourceTTLRule,
+	scheduledTTLs map[string]time.Duration,
+	globalTTL time.Duration,
+) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+
+	mc.detailedPortsMu.Lock()
+	defer mc.detailedPortsMu.Unlock()
+
+	if !mc.configureDetailedMetricsLocked(generation, enabled, budget, resetState) {
+		return
+	}
+	mc.setSweeperTTL(globalTTL)
+	mc.configureDetailedSourceTTLsLocked(rules)
+	mc.configureScheduledTargetTTLsLocked(scheduledTTLs)
+}
+
+// ConfigureDetailedSourceTTLs atomically replaces the live scheduled-source
+// TTL policy and immediately reapplies it to already-owned detail state.
+func (mc *Collector) ConfigureDetailedSourceTTLs(
+	generation uint64,
+	rules []DetailedSourceTTLRule,
+) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+
+	mc.detailedPortsMu.Lock()
+	defer mc.detailedPortsMu.Unlock()
+
+	if generation != mc.detailedGeneration {
+		return
+	}
+	mc.configureDetailedSourceTTLsLocked(rules)
+}
+
+func (mc *Collector) configureDetailedSourceTTLsLocked(rules []DetailedSourceTTLRule) {
+	mc.detailedSourceTTLs = normalizeDetailedSourceTTLRules(rules)
+	for sourceID, source := range mc.detailedPortSources {
+		source.MinTTL = mc.detailedSourceTTLLocked(sourceID)
+	}
+}
+
+func (mc *Collector) updateMetrics(
+	targetKey string,
+	newResults map[string]struct{},
+	scanSequence uint64,
+) bool {
 	prevScanInfo := mc.getPreviousScanInfo(targetKey)
+	if scanSequence > 0 && prevScanInfo.Sequence >= scanSequence {
+		return false
+	}
 	// Record port state changes before updating current scan data.
 	mc.updatePortStateChanges(targetKey, prevScanInfo.Ports, newResults)
 	// Update aggregated open ports metric by target components.
 	tgt, pr, proto := parseTargetKey(targetKey)
 	mc.scanTargetOpenPortsTotal.WithLabelValues(tgt, pr, proto).Set(float64(len(newResults)))
-	mc.storeCurrentScanInfo(targetKey, newResults)
+	mc.storeCurrentScanInfo(targetKey, newResults, scanSequence)
+	return true
 }
 
 // CanScan checks if a new scan can be performed based on the scan interval.
 func (mc *Collector) CanScan(targetKey string, scanInterval time.Duration) bool {
-	infoInterface, exists := mc.scannedTargets.Load(targetKey)
+	return mc.CanScanForGeneration(targetKey, scanInterval, 0)
+}
+
+// CanScanForGeneration makes a source immediately eligible when its last
+// enqueue belongs to an older detail topology.
+func (mc *Collector) CanScanForGeneration(
+	targetKey string,
+	scanInterval time.Duration,
+	generation uint64,
+) bool {
+	lastScheduled, exists := mc.scheduledTargets.Load(targetKey)
 	if !exists {
 		return true
 	}
-	info := infoInterface.(*ScanInfo)
-	return time.Since(info.LastScan) >= scanInterval
+	info := lastScheduled.(*scheduledScanInfo)
+	if info.Generation != generation {
+		return true
+	}
+	return mc.nowTime().Sub(info.EnqueuedAt) >= scanInterval
 }
 
-// RegisterScan registers a new scan with the current time.
+// RegisterScan records when a scheduled scan was enqueued without overwriting
+// the last successful result used by lifecycle and transition metrics.
 func (mc *Collector) RegisterScan(targetKey string) {
-	mc.scannedTargets.Store(targetKey, &ScanInfo{
-		Ports:    make(map[string]struct{}),
-		LastScan: time.Now(),
+	mc.RegisterScanForGeneration(targetKey, 0)
+}
+
+// RegisterScanForGeneration records an enqueue against its detail topology.
+func (mc *Collector) RegisterScanForGeneration(targetKey string, generation uint64) {
+	mc.scheduledTargets.Store(targetKey, &scheduledScanInfo{
+		EnqueuedAt: mc.nowTime(),
+		Generation: generation,
 	})
+}
+
+// NextScanSequence returns a process-local monotonic observation sequence.
+// Scans capture it before starting so older, slower results cannot overwrite a
+// newer successful observation of the same source.
+func (mc *Collector) NextScanSequence() uint64 {
+	return mc.scanSequence.Add(1)
+}
+
+// BeginScan registers an in-flight observation and returns its monotonic
+// sequence. Tracking prevents an ordering tombstone from expiring while an
+// older scan can still complete.
+func (mc *Collector) BeginScan(source DetailedSource) uint64 {
+	source = normalizeDetailedSource(source)
+	mc.stateUpdateMu.Lock()
+	sequence := mc.NextScanSequence()
+	active := mc.inFlightScans[source]
+	if active == nil {
+		active = make(map[uint64]struct{})
+		mc.inFlightScans[source] = active
+	}
+	active[sequence] = struct{}{}
+	mc.stateUpdateMu.Unlock()
+	return sequence
+}
+
+// EndScan removes a previously registered in-flight observation.
+func (mc *Collector) EndScan(source DetailedSource, sequence uint64) {
+	if sequence == 0 {
+		return
+	}
+	source = normalizeDetailedSource(source)
+	mc.stateUpdateMu.Lock()
+	if active := mc.inFlightScans[source]; active != nil {
+		delete(active, sequence)
+		if len(active) == 0 {
+			delete(mc.inFlightScans, source)
+		}
+	}
+	mc.stateUpdateMu.Unlock()
+}
+
+func (mc *Collector) hasOlderInFlightLocked(source DetailedSource, sequence uint64) bool {
+	if sequence == 0 {
+		return false
+	}
+	for activeSequence := range mc.inFlightScans[source] {
+		if activeSequence < sequence {
+			return true
+		}
+	}
+	return false
 }
 
 // IncrementScanTimeout increments the scan timeout counter.
@@ -361,6 +668,35 @@ func (mc *Collector) SetPerTargetTTL(key string, ttl time.Duration) {
 	mc.perTargetTTLMu.Unlock()
 }
 
+// ConfigureScheduledTargetTTLs replaces the live scheduler retention policy.
+// Removed targets lose their enqueue timestamps so re-adding them schedules an
+// immediate scan; interval increases take effect before the new config is read.
+func (mc *Collector) ConfigureScheduledTargetTTLs(ttls map[string]time.Duration) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+	mc.configureScheduledTargetTTLsLocked(ttls)
+}
+
+func (mc *Collector) configureScheduledTargetTTLsLocked(ttls map[string]time.Duration) {
+	normalized := make(map[string]time.Duration, len(ttls))
+	validTargets := make(map[string]struct{}, len(ttls))
+	for key, ttl := range ttls {
+		if ttl > 0 {
+			normalized[key] = ttl
+			validTargets[key] = struct{}{}
+		}
+	}
+	mc.perTargetTTLMu.Lock()
+	mc.perTargetTTL = normalized
+	mc.perTargetTTLMu.Unlock()
+	mc.scheduledTargets.Range(func(key, _ any) bool {
+		if _, exists := validTargets[key.(string)]; !exists {
+			mc.scheduledTargets.Delete(key)
+		}
+		return true
+	})
+}
+
 // ------------------- NEW METHODS -------------------
 
 // UpdateHostCounts updates the number of hosts found up/down for a given target.
@@ -384,12 +720,89 @@ func (mc *Collector) SetLastScanTimestamp(target, portRange, protocol string, ts
 	mc.lastScanTimestamp.WithLabelValues(target, portRange, protocol).Set(float64(ts.Unix()))
 }
 
+// UpdateLastResultMetricsForScan writes last-result gauges only if sequence is
+// still the accepted observation for this source and its lifecycle generation
+// remains active. The validation and writes share stateUpdateMu so an older
+// scan cannot overwrite gauges after a newer result wins.
+func (mc *Collector) UpdateLastResultMetricsForScan(
+	targetKey string,
+	scanSequence uint64,
+	generation uint64,
+	completedAt time.Time,
+	duration float64,
+	durationEnabled bool,
+	hostsUp int,
+	hostsDown int,
+) bool {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+	if generation != mc.detailedGeneration {
+		return false
+	}
+	stored, exists := mc.scannedTargets.Load(targetKey)
+	if !exists || stored.(*ScanInfo).Sequence != scanSequence {
+		return false
+	}
+	target, portRange, protocol := parseTargetKey(targetKey)
+	mc.lastScanTimestamp.WithLabelValues(target, portRange, protocol).Set(float64(completedAt.Unix()))
+	if durationEnabled {
+		mc.scanDuration.WithLabelValues(target, portRange, protocol).Set(duration)
+	}
+	mc.hostUpCount.WithLabelValues(target, portRange, protocol).Set(float64(hostsUp))
+	mc.hostDownCount.WithLabelValues(target, portRange, protocol).Set(float64(hostsDown))
+	return true
+}
+
 // ------------------- PRIVATE METHODS -------------------
 
 // ScanInfo holds information about a scan.
 type ScanInfo struct {
 	Ports    map[string]struct{}
 	LastScan time.Time
+	Sequence uint64
+}
+
+type scheduledScanInfo struct {
+	EnqueuedAt time.Time
+	Generation uint64
+}
+
+// DetailedPort contains the labels for one openport_port_open series.
+type DetailedPort struct {
+	Alias    string
+	IP       string
+	Port     string
+	Protocol string
+}
+
+// DetailedSource identifies the scan tuple that authoritatively reconciles a
+// set of detailed series. A structured key avoids delimiter collisions.
+type DetailedSource struct {
+	Target    string
+	PortRange string
+	Protocol  string
+}
+
+// DetailedSourceTTLRule keeps scheduled detail state alive for at least the
+// configured source cadence. Target may be an IP or CIDR; child shards inherit
+// the rule when port range and protocol also match.
+type DetailedSourceTTLRule struct {
+	Source DetailedSource
+	MinTTL time.Duration
+}
+
+// detailedScanInfo stores the admitted series and ordering tombstone for the
+// latest successful detailed result from one scan source. Empty results are
+// retained until TTL so an older concurrent scan cannot restore closed state.
+type detailedScanInfo struct {
+	Ports    map[DetailedPort]struct{}
+	LastScan time.Time
+	MinTTL   time.Duration
+	Sequence uint64
+}
+
+type detailedSeriesInfo struct {
+	Owners map[DetailedSource]struct{}
 }
 
 func (mc *Collector) getPreviousScanInfo(targetKey string) *ScanInfo {
@@ -400,11 +813,23 @@ func (mc *Collector) getPreviousScanInfo(targetKey string) *ScanInfo {
 	return prevScanInfoInterface.(*ScanInfo)
 }
 
-func (mc *Collector) storeCurrentScanInfo(targetKey string, newResults map[string]struct{}) {
+func (mc *Collector) storeCurrentScanInfo(
+	targetKey string,
+	newResults map[string]struct{},
+	scanSequence uint64,
+) {
 	mc.scannedTargets.Store(targetKey, &ScanInfo{
 		Ports:    newResults,
-		LastScan: time.Now(),
+		LastScan: mc.nowTime(),
+		Sequence: scanSequence,
 	})
+}
+
+func (mc *Collector) nowTime() time.Time {
+	if mc.now == nil {
+		return time.Now()
+	}
+	return mc.now()
 }
 
 // updatePortStateChanges tracks changes in port state between scans.
@@ -446,7 +871,7 @@ func (mc *Collector) StartSweeper(ctx context.Context, ttl time.Duration) {
 	if mc.sweeperTicker != nil {
 		mc.sweeperTicker.Stop()
 	}
-	mc.sweeperTicker = time.NewTicker(ttl / 2)
+	mc.sweeperTicker = time.NewTicker(sweeperInterval(ttl))
 	ticker := mc.sweeperTicker
 	reset := mc.sweeperReset
 	mc.sweeperMu.Unlock()
@@ -474,48 +899,81 @@ func (mc *Collector) StartSweeper(ctx context.Context, ttl time.Duration) {
 				if mc.sweeperTicker != nil {
 					mc.sweeperTicker.Stop()
 				}
-				mc.sweeperTicker = time.NewTicker(newTTL / 2)
+				mc.sweeperTicker = time.NewTicker(sweeperInterval(newTTL))
 				ticker = mc.sweeperTicker
 				mc.sweeperMu.Unlock()
 			case <-ticker.C:
-				defaultTTL := mc.getSweeperTTL()
-				now := time.Now()
-				mc.scannedTargets.Range(func(key, value any) bool {
-					k := key.(string)
-					v := value.(*ScanInfo)
-					mc.perTargetTTLMu.Lock()
-					tttl, ok := mc.perTargetTTL[k]
-					mc.perTargetTTLMu.Unlock()
-					eff := defaultTTL
-					if ok && tttl > 0 {
-						eff = tttl
-					}
-					if now.Sub(v.LastScan) > eff {
-						mc.scannedTargets.Delete(k)
-						tgt, pr, proto := parseTargetKey(k)
-						mc.deleteAllTargetSeries(tgt, pr, proto)
-					}
-					return true
-				})
-				mc.detailedPortsMu.Lock()
-				for k, last := range mc.detailedPorts {
-					if now.Sub(last) > defaultTTL {
-						parts := strings.Split(k, "|")
-						if len(parts) == 4 {
-							_ = mc.portOpen.DeleteLabelValues(
-								parts[0],
-								parts[1],
-								parts[2],
-								parts[3],
-							)
-						}
-						delete(mc.detailedPorts, k)
-					}
-				}
-				mc.detailedPortsMu.Unlock()
+				mc.sweepOnce(mc.nowTime())
 			}
 		}
 	}()
+}
+
+func sweeperInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 2
+	if interval <= 0 {
+		return time.Nanosecond
+	}
+	return interval
+}
+
+func (mc *Collector) sweepOnce(now time.Time) {
+	mc.stateUpdateMu.Lock()
+	defer mc.stateUpdateMu.Unlock()
+	defaultTTL := mc.getSweeperTTL()
+	mc.detailedPortsMu.Lock()
+	defer mc.detailedPortsMu.Unlock()
+
+	mc.scannedTargets.Range(func(key, value any) bool {
+		k := key.(string)
+		v := value.(*ScanInfo)
+		mc.perTargetTTLMu.Lock()
+		targetTTL, ok := mc.perTargetTTL[k]
+		mc.perTargetTTLMu.Unlock()
+		effectiveTTL := defaultTTL
+		if ok && targetTTL > effectiveTTL {
+			effectiveTTL = targetTTL
+		}
+		if sourceTTL := mc.detailedSourceTTLLocked(detailedSourceFromTargetKey(k)); sourceTTL > effectiveTTL {
+			effectiveTTL = sourceTTL
+		}
+		if metricStateExpired(now, v.LastScan, effectiveTTL) &&
+			!mc.hasOlderInFlightLocked(detailedSourceFromTargetKey(k), v.Sequence) {
+			mc.scannedTargets.Delete(k)
+			tgt, pr, proto := parseTargetKey(k)
+			mc.deleteAllTargetSeries(tgt, pr, proto)
+		}
+		return true
+	})
+	mc.scheduledTargets.Range(func(key, value any) bool {
+		k := key.(string)
+		mc.perTargetTTLMu.Lock()
+		targetTTL, ok := mc.perTargetTTL[k]
+		mc.perTargetTTLMu.Unlock()
+		effectiveTTL := defaultTTL
+		if ok && targetTTL > effectiveTTL {
+			effectiveTTL = targetTTL
+		}
+		if metricStateExpired(now, value.(*scheduledScanInfo).EnqueuedAt, effectiveTTL) {
+			mc.scheduledTargets.Delete(key)
+		}
+		return true
+	})
+
+	for sourceID, source := range mc.detailedPortSources {
+		effectiveTTL := defaultTTL
+		if source.MinTTL > effectiveTTL {
+			effectiveTTL = source.MinTTL
+		}
+		if metricStateExpired(now, source.LastScan, effectiveTTL) &&
+			!mc.hasOlderInFlightLocked(sourceID, source.Sequence) {
+			mc.removeDetailedSourceLocked(sourceID)
+		}
+	}
+}
+
+func metricStateExpired(now, lastScan time.Time, ttl time.Duration) bool {
+	return ttl > 0 && !now.Before(lastScan.Add(ttl))
 }
 
 // ------------------- BACKGROUND DETAILS HELPERS -------------------
@@ -527,48 +985,245 @@ func (mc *Collector) DetailedSeriesCount() int {
 	return len(mc.detailedPorts)
 }
 
-// IncrementDroppedSeries increments the counter for dropped detail series.
-func (mc *Collector) IncrementDroppedSeries() {
-	mc.detailsSeriesDropped.Inc()
-}
-
-// SetDetailedPortOpen sets a detailed port as open and tracks it for TTL management.
-// This method is deprecated in favor of SetDetailedPortOpenWithBudget for thread-safe budget enforcement.
-func (mc *Collector) SetDetailedPortOpen(alias, ip, port, proto string) {
-	mc.portOpen.WithLabelValues(alias, ip, port, proto).Set(1)
-	key := strings.Join([]string{alias, ip, port, proto}, "|")
-	mc.detailedPortsMu.Lock()
-	mc.detailedPorts[key] = time.Now()
-	mc.detailedPortsMu.Unlock()
-}
-
-// SetDetailedPortOpenWithBudget atomically checks the series budget and adds a detailed port metric.
-// Returns true if the port was added, false if the budget was exceeded.
-// This method provides thread-safe budget enforcement for multi-worker scenarios.
-func (mc *Collector) SetDetailedPortOpenWithBudget(alias, ip, port, proto string, budget int) bool {
+func (mc *Collector) reconcileDetailedPorts(
+	targetKey string,
+	update DetailedPortUpdate,
+) int {
 	mc.detailedPortsMu.Lock()
 	defer mc.detailedPortsMu.Unlock()
 
-	// Check budget constraint atomically
-	if budget > 0 && len(mc.detailedPorts) >= budget {
-		return false // Budget exceeded
+	if !mc.detailedEnabled || update.Generation != mc.detailedGeneration {
+		return 0
+	}
+	sourceID := normalizeDetailedSource(update.Source)
+	if sourceID == (DetailedSource{}) {
+		sourceID = detailedSourceFromTargetKey(targetKey)
+	}
+	previous := mc.detailedPortSources[sourceID]
+	if update.ScanSequence > 0 && previous != nil && previous.Sequence >= update.ScanSequence {
+		return 0
 	}
 
-	// Add the metric and track it
-	key := strings.Join([]string{alias, ip, port, proto}, "|")
-	mc.detailedPorts[key] = time.Now()
-	mc.portOpen.WithLabelValues(alias, ip, port, proto).Set(1)
+	currentPorts := make(map[DetailedPort]struct{}, len(update.Ports))
+	for _, port := range update.Ports {
+		currentPorts[normalizeDetailedPort(port)] = struct{}{}
+	}
 
-	return true
+	// Remove closed ports before admitting new ones so capacity released by this
+	// scan can be reused immediately.
+	if previous != nil {
+		for port := range previous.Ports {
+			if _, stillOpen := currentPorts[port]; !stillOpen {
+				mc.removeDetailedOwnerLocked(port, sourceID)
+			}
+		}
+	}
+
+	orderedPorts := make([]DetailedPort, 0, len(currentPorts))
+	for port := range currentPorts {
+		orderedPorts = append(orderedPorts, port)
+	}
+	sortDetailedPorts(orderedPorts)
+
+	var admitted map[DetailedPort]struct{}
+	dropped := 0
+	for _, port := range orderedPorts {
+		series := mc.detailedPorts[port]
+		if series == nil {
+			if mc.detailedSeriesBudget > 0 && len(mc.detailedPorts) >= mc.detailedSeriesBudget {
+				dropped++
+				continue
+			}
+			series = &detailedSeriesInfo{Owners: make(map[DetailedSource]struct{})}
+			mc.detailedPorts[port] = series
+			setDetailedPortMetric(mc.portOpen, port)
+		}
+		series.Owners[sourceID] = struct{}{}
+		if admitted == nil {
+			admitted = make(map[DetailedPort]struct{})
+		}
+		admitted[port] = struct{}{}
+	}
+
+	sequence := update.ScanSequence
+	if sequence == 0 && previous != nil {
+		sequence = previous.Sequence
+	}
+	mc.detailedPortSources[sourceID] = &detailedScanInfo{
+		Ports:    admitted,
+		LastScan: mc.nowTime(),
+		MinTTL:   mc.detailedSourceTTLLocked(sourceID),
+		Sequence: sequence,
+	}
+	return dropped
 }
 
-// DeleteDetailedPort removes a detailed port metric and its tracking entry.
-func (mc *Collector) DeleteDetailedPort(alias, ip, port, proto string) {
-	_ = mc.portOpen.DeleteLabelValues(alias, ip, port, proto)
-	key := strings.Join([]string{alias, ip, port, proto}, "|")
-	mc.detailedPortsMu.Lock()
-	delete(mc.detailedPorts, key)
-	mc.detailedPortsMu.Unlock()
+func normalizeDetailedPort(port DetailedPort) DetailedPort {
+	port.Protocol = strings.ToLower(port.Protocol)
+	return port
+}
+
+func normalizeDetailedSource(source DetailedSource) DetailedSource {
+	source.Target = strings.TrimSpace(source.Target)
+	source.PortRange = strings.TrimSpace(source.PortRange)
+	source.Protocol = strings.ToLower(strings.TrimSpace(source.Protocol))
+	return source
+}
+
+func detailedSourceFromTargetKey(targetKey string) DetailedSource {
+	target, portRange, protocol := parseTargetKey(targetKey)
+	return normalizeDetailedSource(DetailedSource{
+		Target:    target,
+		PortRange: portRange,
+		Protocol:  protocol,
+	})
+}
+
+func sortDetailedPorts(ports []DetailedPort) {
+	sort.Slice(ports, func(i, j int) bool {
+		left, right := ports[i], ports[j]
+		if left.Alias != right.Alias {
+			return left.Alias < right.Alias
+		}
+		if left.IP != right.IP {
+			return left.IP < right.IP
+		}
+		if left.Port != right.Port {
+			return left.Port < right.Port
+		}
+		return left.Protocol < right.Protocol
+	})
+}
+
+func (mc *Collector) removeDetailedOwnerLocked(port DetailedPort, sourceID DetailedSource) {
+	series := mc.detailedPorts[port]
+	if series == nil {
+		return
+	}
+	delete(series.Owners, sourceID)
+	if source := mc.detailedPortSources[sourceID]; source != nil {
+		delete(source.Ports, port)
+	}
+	if len(series.Owners) == 0 {
+		deleteDetailedPortMetric(mc.portOpen, port)
+		delete(mc.detailedPorts, port)
+	}
+}
+
+func (mc *Collector) removeDetailedSourceLocked(sourceID DetailedSource) {
+	source := mc.detailedPortSources[sourceID]
+	if source == nil {
+		return
+	}
+	for port := range source.Ports {
+		series := mc.detailedPorts[port]
+		if series == nil {
+			continue
+		}
+		delete(series.Owners, sourceID)
+		if len(series.Owners) == 0 {
+			deleteDetailedPortMetric(mc.portOpen, port)
+			delete(mc.detailedPorts, port)
+		}
+	}
+	delete(mc.detailedPortSources, sourceID)
+}
+
+func (mc *Collector) removeDetailedSeriesLocked(port DetailedPort) {
+	series := mc.detailedPorts[port]
+	if series == nil {
+		return
+	}
+	for sourceID := range series.Owners {
+		if source := mc.detailedPortSources[sourceID]; source != nil {
+			delete(source.Ports, port)
+		}
+	}
+	deleteDetailedPortMetric(mc.portOpen, port)
+	delete(mc.detailedPorts, port)
+}
+
+func (mc *Collector) enforceDetailedBudgetLocked(budget int) int {
+	if budget <= 0 || len(mc.detailedPorts) <= budget {
+		return 0
+	}
+	ports := make([]DetailedPort, 0, len(mc.detailedPorts))
+	for port := range mc.detailedPorts {
+		ports = append(ports, port)
+	}
+	sortDetailedPorts(ports)
+	for _, port := range ports[budget:] {
+		mc.removeDetailedSeriesLocked(port)
+	}
+	return len(ports) - budget
+}
+
+func normalizeDetailedSourceTTLRules(rules []DetailedSourceTTLRule) []DetailedSourceTTLRule {
+	normalized := make([]DetailedSourceTTLRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.MinTTL <= 0 {
+			continue
+		}
+		rule.Source = normalizeDetailedSource(rule.Source)
+		if rule.Source == (DetailedSource{}) {
+			continue
+		}
+		normalized = append(normalized, rule)
+	}
+	return normalized
+}
+
+func (mc *Collector) detailedSourceTTLLocked(source DetailedSource) time.Duration {
+	var minimum time.Duration
+	for _, rule := range mc.detailedSourceTTLs {
+		if source.PortRange != rule.Source.PortRange || source.Protocol != rule.Source.Protocol {
+			continue
+		}
+		if !detailTargetWithin(source.Target, rule.Source.Target) {
+			continue
+		}
+		if rule.MinTTL > minimum {
+			minimum = rule.MinTTL
+		}
+	}
+	return minimum
+}
+
+func detailTargetWithin(target, parent string) bool {
+	if target == parent {
+		return true
+	}
+	childPrefix, childOK := detailTargetPrefix(target)
+	parentPrefix, parentOK := detailTargetPrefix(parent)
+	if !childOK || !parentOK || childPrefix.Addr().BitLen() != parentPrefix.Addr().BitLen() {
+		return false
+	}
+	return childPrefix.Bits() >= parentPrefix.Bits() && parentPrefix.Contains(childPrefix.Addr())
+}
+
+func detailTargetPrefix(target string) (netip.Prefix, bool) {
+	target = strings.TrimSpace(target)
+	if prefix, err := netip.ParsePrefix(target); err == nil {
+		return prefix.Masked(), true
+	}
+	if address, err := netip.ParseAddr(target); err == nil {
+		return netip.PrefixFrom(address, address.BitLen()), true
+	}
+	return netip.Prefix{}, false
+}
+
+func (mc *Collector) clearDetailedPortsLocked() {
+	mc.portOpen.Reset()
+	clear(mc.detailedPorts)
+	clear(mc.detailedPortSources)
+}
+
+func setDetailedPortMetric(metric *prometheus.GaugeVec, port DetailedPort) {
+	metric.WithLabelValues(port.Alias, port.IP, port.Port, port.Protocol).Set(1)
+}
+
+func deleteDetailedPortMetric(metric *prometheus.GaugeVec, port DetailedPort) {
+	_ = metric.DeleteLabelValues(port.Alias, port.IP, port.Port, port.Protocol)
 }
 
 // DebugDumpDetailed returns debug information about detailed series (for debug/tests only).

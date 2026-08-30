@@ -3,8 +3,11 @@ package cmd
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/renatogalera/openport-exporter/internal/collectors"
+	cfgpkg "github.com/renatogalera/openport-exporter/internal/config"
+	"github.com/renatogalera/openport-exporter/internal/scanner"
 )
 
 // NOTE: We use package `cmd` (not cmd_test) so we can exercise unexported
@@ -37,6 +40,27 @@ func TestRun_ReturnsErrorOnMissingConfig(t *testing.T) {
 	}
 	if got := err.Error(); !containsAny(got, []string{"load config", "no such file", "cannot read", "open"}) {
 		t.Fatalf("unexpected error message from run(): %q", got)
+	}
+}
+
+func TestScheduledLifecyclePoliciesUseThreeTimesEachTargetInterval(t *testing.T) {
+	cfg := &cfgpkg.Config{
+		Scanning: cfgpkg.ScanningConfig{Interval: 3600},
+		Targets: []cfgpkg.TargetDef{
+			{Target: "192.168.1.0/24", PortRange: "22", Protocol: "tcp", Interval: "24h"},
+			{Target: "192.168.2.0/24", PortRange: "443", Protocol: "tcp"},
+		},
+	}
+	rules := detailedSourceTTLRules(cfg)
+	if len(rules) != 2 || rules[0].MinTTL != 72*time.Hour || rules[1].MinTTL != 3*time.Hour {
+		t.Fatalf("unexpected detail TTL rules: %+v", rules)
+	}
+
+	ttls := scheduledTargetTTLs(cfg)
+	firstKey := scanner.CreateTargetKeyFor("192.168.1.0/24", "22", "tcp")
+	secondKey := scanner.CreateTargetKeyFor("192.168.2.0/24", "443", "tcp")
+	if ttls[firstKey] != 72*time.Hour || ttls[secondKey] != 3*time.Hour {
+		t.Fatalf("unexpected scheduled TTLs: %+v", ttls)
 	}
 }
 

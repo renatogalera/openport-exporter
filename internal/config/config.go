@@ -22,6 +22,8 @@ type Config struct {
 	Policy    *PolicyConfig     `yaml:"policy,omitempty"`
 	Scheduler *SchedulerConfig  `yaml:"scheduler,omitempty"`
 	Modules   map[string]Module `yaml:"modules,omitempty"`
+
+	detailsRevision uint64
 }
 
 // TargetDef defines a background scanning target configuration.
@@ -245,6 +247,16 @@ func LoadConfig(filename string) (*Config, error) {
 		if strings.TrimSpace(cfg.BackgroundDetails.TTL) == "" {
 			cfg.BackgroundDetails.TTL = "30m"
 		}
+		ttl, err := time.ParseDuration(cfg.BackgroundDetails.TTL)
+		if err != nil {
+			return nil, fmt.Errorf("background_details.ttl %q: %w", cfg.BackgroundDetails.TTL, err)
+		}
+		if ttl <= 0 {
+			return nil, fmt.Errorf(
+				"background_details.ttl: expected a positive Go duration, got %q",
+				cfg.BackgroundDetails.TTL,
+			)
+		}
 		if cfg.BackgroundDetails.IncludeIP == nil {
 			t := true
 			cfg.BackgroundDetails.IncludeIP = &t
@@ -345,6 +357,12 @@ func LoadConfig(filename string) (*Config, error) {
 // GetScanIntervalDuration returns the scan interval as a time.Duration.
 func (c *Config) GetScanIntervalDuration() time.Duration {
 	return time.Duration(c.Scanning.Interval) * time.Second
+}
+
+// DetailsRevision identifies the scan/detail lifecycle definition used by this
+// immutable configuration snapshot.
+func (c Config) DetailsRevision() uint64 {
+	return c.detailsRevision
 }
 
 // UseSYNScanEnabled returns the effective value of UseSYNScan (default true when unset).

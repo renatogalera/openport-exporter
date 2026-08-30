@@ -165,7 +165,7 @@ targets:
 background_details:
   enabled: false
   series_budget: 2000                 # upper bound of concurrently exposed per-port series
-  ttl: "30m"                          # TTL for detailed series without reconfirmation
+  ttl: "30m"                          # fallback TTL for details without successful reconfirmation
   targets:                            # explicit allowlist of what can emit detail-series
     - alias: "ssh-bastion-primary"    # REQUIRED and unique
       cidr: "203.0.113.10/32"         # IP or CIDR
@@ -232,7 +232,9 @@ modules:
 > **Sweeper TTL**
 > Global time‑to‑live for inactive series defaults to **3× scanning interval**.
 > If `background_details.ttl` is set, that value becomes the **effective global TTL**.
-> TTL changes on reload are applied live to the sweeper.
+> For scheduled scan sources, aggregate and detailed state use the greater of
+> this value and **3× that target's interval**, so a healthy hourly scan cannot
+> become stale between runs. TTL changes on reload are applied atomically.
 
 ### Flags & environment
 
@@ -276,6 +278,13 @@ curl -X POST http://localhost:9919/-/reload
 * `policy.*` and `server.trusted_proxies_cidrs` (affects Tasks API guards)
 * `scheduler.module_limits` and API concurrency/limits
 
+Changing the detail allowlist, aliases, include flags, enabled state, or scan
+source/shard topology clears the old detailed series immediately and makes the
+new generation eligible to scan. Results from queued or running scans of the
+prior definition cannot recreate those series. Budget increases preserve the
+current state; reductions evict deterministic excess immediately, which can
+return after a later successful scan if capacity is available.
+
 **Requires restart:**
 
 * HTTP listen port / TLS / network bindings
@@ -290,6 +299,8 @@ curl -X POST http://localhost:9919/-/reload
 
 * Aliases must be unique.
 * Each item must declare a valid IP/CIDR and a valid port list/ranges.
+* When background details are enabled, `ttl` must be a positive
+  [Go duration](https://pkg.go.dev/time#ParseDuration).
 * Invalid rules cause reload to **fail** with a clear error; the previous config remains active.
 
 ---
@@ -381,8 +392,8 @@ All metric names below are **exactly** as exported by the current code.
 | `openport_scans_failed_total`           | Counter   | `target,port_range,protocol,error_type`  | Failed scans by `error_type` (`timeout`,`permission`,`other`,`scanner_creation`). |
 | `openport_last_scan_timestamp_seconds`  | Gauge     | `target,port_range,protocol`             | Unix timestamp of last successful scan.                                           |
 | `openport_port_state_changes_total`     | Counter   | `target,port_range,protocol,change_type` | `closed_to_open` / `open_to_closed`.                                              |
-| `openport_port_open`                    | Gauge     | `alias,ip,port,protocol`                 | Background details: 1 if `(alias/ip,port,proto)` is open.                         |
-| `openport_details_series_dropped_total` | Counter   | —                                        | Background details: series dropped due to `series_budget`.                        |
+| `openport_port_open`                    | Gauge     | `alias,ip,port,protocol`                 | Presence-only background detail: emitted as 1 while the port is currently open.  |
+| `openport_details_series_dropped_total` | Counter   | —                                        | Budget drop events, deduplicated within a scan; also counts immediate evictions.  |
 
 ### Scheduler / Tasks metrics
 
@@ -408,7 +419,28 @@ All metric names below are **exactly** as exported by the current code.
 > * Backpressure: `increase(openport_scheduler_enqueue_failed_total[5m]) > 0`
 > * p95 slow scans: `histogram_quantile(0.95, sum(rate(openport_scan_duration_seconds_bucket[10m])) by (le)) > 60`
 > * Exposure changed: `increase(openport_port_state_changes_total[15m]) > 0`
-> * Critical port closed (with background details): `openport_port_open{alias="ssh-bastion-primary",port="22"} == 0`
+> * Critical port unavailable (with background details): `absent(openport_port_open{alias="ssh-bastion-primary",port="22",protocol="tcp"})`
+
+`openport_port_open` is presence-only: open ports are exported with value `1`,
+while ports absent from the latest successful result have no series. A successful
+scan removes the series immediately after its last reporting scan source stops
+observing it; failed scans preserve the last successful state until TTL eviction.
+The sweeper runs every TTL/2, so removal can occur up to TTL/2 after the series
+first becomes eligible. Ownership by source keeps overlapping ranges and
+`include_ip: false` safe.
+
+The `absent()` expression is illustrative: it also matches a series omitted by
+budget, not yet scanned, expired after prolonged scan failures, or disabled by
+configuration. Production alerts should also require the exporter to be up, the
+corresponding `openport_last_scan_timestamp_seconds` to be recent, and a budget
+sized so `increase(openport_details_series_dropped_total[2h])` remains zero for
+hourly scans (use a range longer than the configured interval). Use an alert
+`for` period longer than the expected scan and reload convergence time so a
+definition reload does not page before its forced new-generation scan completes.
+
+`series_budget` caps exported detail series. Internal ownership/order bookkeeping
+also tracks each distinct successful scan tuple until TTL, so keep Tasks API
+access and fan-out limits bounded.
 
 ---
 

@@ -155,3 +155,195 @@ func TestGetScanIntervalDuration(t *testing.T) {
 		t.Errorf("Expected duration to be %v, got %v", expected, actual)
 	}
 }
+
+func TestManagerDetailsRevisionChangesOnlyForRuntimeRelevantSettings(t *testing.T) {
+	includeIP := true
+	initial := &Config{BackgroundDetails: &BackgroundDetailsConfig{
+		Enabled:      true,
+		SeriesBudget: 10,
+		TTL:          "30m",
+		IncludeAlias: true,
+		IncludeIP:    &includeIP,
+		Targets: []DetailTarget{{
+			Alias:    "ssh",
+			CIDR:     "192.168.1.10/32",
+			Protocol: "tcp",
+			Ports:    []string{"22"},
+		}},
+	}}
+	mgr := NewManager(initial, "config.yaml")
+	initialRevision := mgr.Get().DetailsRevision()
+	if initialRevision == 0 {
+		t.Fatal("expected an initialized details revision")
+	}
+
+	ttlOnly := cloneConfigForDetailsTest(initial)
+	ttlOnly.BackgroundDetails.TTL = "1h"
+	mgr.Update(ttlOnly)
+	if got := mgr.Get().DetailsRevision(); got != initialRevision {
+		t.Fatalf("TTL-only reload changed details revision: want %d, got %d", initialRevision, got)
+	}
+
+	budgetOnly := cloneConfigForDetailsTest(ttlOnly)
+	budgetOnly.BackgroundDetails.SeriesBudget = 5
+	mgr.Update(budgetOnly)
+	budgetRevision := mgr.Get().DetailsRevision()
+	if budgetRevision != initialRevision {
+		t.Fatalf(
+			"budget-only reload changed details revision: want %d, got %d",
+			initialRevision,
+			budgetRevision,
+		)
+	}
+	if DetailedSeriesDefinitionChanged(ttlOnly, budgetOnly) {
+		t.Fatal("budget-only reload must preserve the detailed label definition")
+	}
+
+	aliasChange := cloneConfigForDetailsTest(budgetOnly)
+	aliasChange.BackgroundDetails.Targets[0].Alias = "renamed-ssh"
+	mgr.Update(aliasChange)
+	if got := mgr.Get().DetailsRevision(); got != initialRevision+1 {
+		t.Fatalf("alias reload revision: want %d, got %d", initialRevision+1, got)
+	}
+	if !DetailedSeriesDefinitionChanged(budgetOnly, aliasChange) {
+		t.Fatal("alias reload must invalidate the detailed label definition")
+	}
+
+	intervalOnly := cloneConfigForDetailsTest(aliasChange)
+	intervalOnly.Targets = []TargetDef{{
+		Target: "192.168.1.0/24", PortRange: "22", Protocol: "tcp", Interval: "24h",
+	}}
+	baselineTopology := cloneConfigForDetailsTest(intervalOnly)
+	baselineTopology.Targets[0].Interval = "1h"
+	if DetailedSeriesDefinitionChanged(baselineTopology, intervalOnly) {
+		t.Fatal("interval-only reload must update TTL policy without clearing detailed state")
+	}
+
+	topologyChange := cloneConfigForDetailsTest(intervalOnly)
+	topologyChange.Targets = append([]TargetDef(nil), intervalOnly.Targets...)
+	topologyChange.Targets[0].Target = "192.168.2.0/24"
+	if !DetailedSeriesDefinitionChanged(intervalOnly, topologyChange) {
+		t.Fatal("scan source topology change must invalidate detailed ownership")
+	}
+
+	shardChange := cloneConfigForDetailsTest(intervalOnly)
+	shardChange.Scanning.MaxCIDRSize++
+	if !DetailedSeriesDefinitionChanged(intervalOnly, shardChange) {
+		t.Fatal("shard topology change must invalidate detailed ownership")
+	}
+
+	disabledTopology := cloneConfigForDetailsTest(intervalOnly)
+	disabledTopology.BackgroundDetails.Enabled = false
+	disabledTopologyChange := cloneConfigForDetailsTest(disabledTopology)
+	disabledTopologyChange.Targets = append([]TargetDef(nil), disabledTopology.Targets...)
+	disabledTopologyChange.Targets[0].PortRange = "22,443"
+	if !DetailedSeriesDefinitionChanged(disabledTopology, disabledTopologyChange) {
+		t.Fatal("scan source topology must advance lifecycle generation while details are disabled")
+	}
+}
+
+func TestManagerPreparesReloadBeforePublishingScanSnapshot(t *testing.T) {
+	includeIP := true
+	initial := &Config{BackgroundDetails: &BackgroundDetailsConfig{
+		Enabled:      true,
+		IncludeAlias: true,
+		IncludeIP:    &includeIP,
+		Targets: []DetailTarget{{
+			Alias: "old", CIDR: "192.168.1.10/32", Protocol: "tcp", Ports: []string{"22"},
+		}},
+	}}
+	mgr := NewManager(initial, "config.yaml")
+	next := cloneConfigForDetailsTest(initial)
+	next.BackgroundDetails.Targets[0].Alias = "new"
+
+	visibleAlias := ""
+	mgr.SetOnReload(func(_, pending *Config) {
+		if pending.BackgroundDetails.Targets[0].Alias != "new" {
+			t.Fatalf("callback received unexpected pending config")
+		}
+		visible, _ := mgr.GetScanSnapshot()
+		visibleAlias = visible.BackgroundDetails.Targets[0].Alias
+	})
+	mgr.Update(next)
+
+	if visibleAlias != "old" {
+		t.Fatalf("reload published before callbacks completed: saw %q", visibleAlias)
+	}
+	visible, cache := mgr.GetScanSnapshot()
+	if visible.BackgroundDetails.Targets[0].Alias != "new" {
+		t.Fatalf("new snapshot was not published after callback")
+	}
+	if alias, ok := cache.Lookup("192.168.1.10", "22", "tcp"); !ok || alias != "new" {
+		t.Fatalf("config/cache snapshot mismatch: alias=%q allowed=%v", alias, ok)
+	}
+}
+
+func TestLoadConfigBackgroundDetailsTTLDefaultAndValidation(t *testing.T) {
+	valid := `
+server:
+  port: 8080
+scanning:
+  interval: 3600
+background_details:
+  enabled: true
+  series_budget: 10
+  targets:
+    - alias: ssh
+      cidr: 192.168.1.10/32
+      protocol: tcp
+      ports: ["22"]
+`
+	cfg := loadConfigContent(t, valid)
+	if cfg.BackgroundDetails.TTL != "30m" {
+		t.Fatalf("background details TTL default: want 30m, got %q", cfg.BackgroundDetails.TTL)
+	}
+
+	invalid := valid + "  ttl: not-a-duration\n"
+	path := writeConfigContent(t, invalid)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("expected invalid background details TTL to fail config loading")
+	}
+}
+
+func cloneConfigForDetailsTest(source *Config) *Config {
+	clone := *source
+	if source.BackgroundDetails == nil {
+		return &clone
+	}
+	details := *source.BackgroundDetails
+	if source.BackgroundDetails.IncludeIP != nil {
+		includeIP := *source.BackgroundDetails.IncludeIP
+		details.IncludeIP = &includeIP
+	}
+	details.Targets = append([]DetailTarget(nil), source.BackgroundDetails.Targets...)
+	for i := range details.Targets {
+		details.Targets[i].Ports = append([]string(nil), details.Targets[i].Ports...)
+	}
+	clone.BackgroundDetails = &details
+	return &clone
+}
+
+func loadConfigContent(t *testing.T, content string) *Config {
+	t.Helper()
+	cfg, err := LoadConfig(writeConfigContent(t, content))
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	return cfg
+}
+
+func writeConfigContent(t *testing.T, content string) string {
+	t.Helper()
+	file, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
+	if err != nil {
+		t.Fatalf("create config: %v", err)
+	}
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		t.Fatalf("write config: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close config: %v", err)
+	}
+	return file.Name()
+}
