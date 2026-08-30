@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -129,6 +131,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	logBackgroundDetailCoverageWarnings(logger, cfg)
 	mgr := cfgpkg.NewManager(cfg, settings.ConfigPath)
 	mc := openmetrics.NewMetricsCollector()
 	mc.ConfigureScanLifecycle(
@@ -171,6 +174,7 @@ func run() error {
 		if newTTL != oldTTL {
 			logger.Info("sweeper TTL updated", "old_ttl", oldTTL.String(), "new_ttl", newTTL.String())
 		}
+		logBackgroundDetailCoverageWarnings(logger, newCfg)
 
 		logger.Info("configuration reloaded",
 			"targets", len(newCfg.Targets),
@@ -323,6 +327,26 @@ func detailedSeriesBudget(details *cfgpkg.BackgroundDetailsConfig) int {
 		return 0
 	}
 	return details.SeriesBudget
+}
+
+func logBackgroundDetailCoverageWarnings(logger *slog.Logger, cfg *cfgpkg.Config) {
+	if logger == nil || cfg == nil {
+		return
+	}
+	for _, detail := range cfg.DetailTargetsWithoutScheduledOverlap() {
+		protocol := strings.ToLower(strings.TrimSpace(detail.Protocol))
+		if protocol == "" {
+			protocol = "tcp"
+		}
+		logger.Warn(
+			"background detail allowlist entry has no scheduled scan overlap",
+			"alias", detail.Alias,
+			"cidr", detail.CIDR,
+			"protocol", protocol,
+			"ports", detail.Ports,
+			"hint", "add an overlapping top-level target or submit a Tasks API scan",
+		)
+	}
 }
 
 func detailedSourceTTLRules(cfg *cfgpkg.Config) []openmetrics.DetailedSourceTTLRule {

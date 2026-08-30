@@ -128,7 +128,7 @@ type BackgroundDetailsConfig struct {
 	Enabled      bool           `yaml:"enabled"`
 	SeriesBudget int            `yaml:"series_budget"` // hard cap
 	TTL          string         `yaml:"ttl"`           // e.g. "30m"
-	Targets      []DetailTarget `yaml:"targets"`
+	Targets      []DetailTarget `yaml:"targets"`       // allowlist only; does not schedule scans
 
 	IncludeAlias bool  `yaml:"include_alias"` // export alias label
 	IncludeIP    *bool `yaml:"include_ip"`    // defaults to true

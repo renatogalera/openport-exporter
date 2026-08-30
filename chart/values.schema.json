@@ -201,6 +201,7 @@
         },
         "targets": {
           "type": "array",
+          "description": "Recurring scheduled scan targets. This is the only configuration section that schedules background Nmap scans.",
           "items": {
             "type": "object",
             "properties": {
@@ -216,21 +217,34 @@
         },
         "background_details": {
           "type": "object",
+          "description": "Allowlisted presence-only per-port series. This section filters scan results and never schedules scans.",
           "properties": {
             "enabled": { "type": "boolean" },
-            "series_budget": { "type": "integer", "minimum": 0 },
-            "ttl": { "type": "string" },
+            "series_budget": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Maximum concurrently exposed detail series per exporter pod; zero or omission defaults to 2000 when enabled."
+            },
+            "ttl": {
+              "type": "string",
+              "description": "Expiry fallback without successful reconfirmation. Empty defaults to 30m; non-empty values are validated as positive Go durations by the exporter. It never controls scan cadence."
+            },
             "include_alias": { "type": "boolean" },
             "include_ip": { "type": ["boolean", "null"] },
             "targets": {
               "type": "array",
+              "description": "Allowlist rules only. Results must come from an overlapping scheduled target or Tasks API scan.",
               "items": {
                 "type": "object",
                 "properties": {
-                  "alias": { "type": "string" },
-                  "cidr": { "type": "string" },
-                  "protocol": { "type": "string" },
-                  "ports": { "type": "array", "items": { "type": "string" } }
+                  "alias": { "type": "string", "description": "Unique non-empty alias; validated by the exporter when details are enabled." },
+                  "cidr": { "type": "string", "description": "IP address or CIDR; validated by the exporter when details are enabled." },
+                  "protocol": { "type": "string", "description": "tcp or udp, case-insensitive; empty defaults to tcp." },
+                  "ports": {
+                    "type": "array",
+                    "description": "Non-empty list of ports or ranges; validated by the exporter when details are enabled.",
+                    "items": { "type": "string" }
+                  }
                 },
                 "required": ["alias", "cidr", "ports"]
               }

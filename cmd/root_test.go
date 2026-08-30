@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -61,6 +63,49 @@ func TestScheduledLifecyclePoliciesUseThreeTimesEachTargetInterval(t *testing.T)
 	secondKey := scanner.CreateTargetKeyFor("192.168.2.0/24", "443", "tcp")
 	if ttls[firstKey] != 72*time.Hour || ttls[secondKey] != 3*time.Hour {
 		t.Fatalf("unexpected scheduled TTLs: %+v", ttls)
+	}
+}
+
+func TestLogBackgroundDetailCoverageWarnings(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	cfg := &cfgpkg.Config{
+		Targets: []cfgpkg.TargetDef{{
+			Target: "10.140.86.115", PortRange: "1-99", Protocol: "tcp",
+		}},
+		BackgroundDetails: &cfgpkg.BackgroundDetailsConfig{
+			Enabled: true,
+			Targets: []cfgpkg.DetailTarget{
+				{
+					Alias:    "web-servers-dmz",
+					CIDR:     "10.140.86.200/32",
+					Protocol: "tcp",
+					Ports:    []string{"80"},
+				},
+			},
+		},
+	}
+
+	logBackgroundDetailCoverageWarnings(logger, cfg)
+	logged := output.String()
+	for _, expected := range []string{
+		`"level":"WARN"`,
+		`"msg":"background detail allowlist entry has no scheduled scan overlap"`,
+		`"alias":"web-servers-dmz"`,
+		`"hint":"add an overlapping top-level target or submit a Tasks API scan"`,
+	} {
+		if !containsASCII(logged, expected) {
+			t.Fatalf("warning missing %q: %s", expected, logged)
+		}
+	}
+
+	output.Reset()
+	cfg.Targets[0] = cfgpkg.TargetDef{
+		Target: "10.140.86.0/24", PortRange: "80", Protocol: "tcp",
+	}
+	logBackgroundDetailCoverageWarnings(logger, cfg)
+	if output.Len() != 0 {
+		t.Fatalf("covered allowlist entry emitted a warning: %s", output.String())
 	}
 }
 

@@ -32,8 +32,9 @@ server:
 ############################
 # Scanning (Global Defaults) #
 ############################
-# interval: Default global scan interval (seconds) applied when a background target lacks its own interval.
-#           Values < 600 are rejected and internally coerced to 10800 (3h) for safety.
+# interval: Legacy global scan interval in seconds, also used by fallback TTL policy.
+#           A scheduled target with no targets[].interval currently defaults to 1h.
+#           Values < 600 are internally coerced to 10800 (3h) for safety.
 # port_range: Default fallback port range when a target's port_range is empty. Supports comma list + ranges.
 # max_cidr_size: Largest subnet prefix length allowed before automatic splitting (e.g. /16 split into /24 if set to 24).
 # timeout: Per-subnet scan timeout in seconds (hard stop for Nmap on that subnet unit).
@@ -87,11 +88,11 @@ scanning:
 
 # Background targets (module is currently ignored by background scheduler)
 # Each entry defines a recurring background scan job:
-# - name: Human-friendly identifier (unique). Appears in metric labels ("target").
+# - name: Optional human-friendly identifier; defaults to target. Metrics use target, not this name.
 # - target: IP or CIDR (IPv4 / IPv6). Large CIDRs will be subdivided based on scanning.max_cidr_size.
 # - port_range: Comma/range syntax. Keep tight to control noise and runtime.
 # - protocol: "tcp" or "udp" (case-insensitive; default tcp if omitted).
-# - interval: Per-target cadence (overrides scanning.interval). Accepts Go duration syntax.
+# - interval: Per-target cadence; defaults to 1h when omitted. Accepts Go duration syntax.
 # - module: (Currently ignored for background; reserved for future module preset application.)
 # targets:
 #   - name: "dmz_ssh"
@@ -110,14 +111,18 @@ scanning:
 # Optional allowlisted detailed per-port series (bounded by budget)
 # Enables low-cardinality, strictly controlled detailed port openness metrics per (alias, ip, port, protocol).
 # Only enable if you need per-host critical port alerting—disable to further minimize cardinality.
+# IMPORTANT: background_details.targets does not schedule scans. It only filters
+# successful results from the top-level targets scheduler or the Tasks API.
 # Fields:
 #   enabled: Gate for feature activation.
 #   series_budget: Hard ceiling on concurrently exposed per-port detail series. Exceeding creates drop events.
-#   ttl: Fallback TTL without successful reconfirmation. Scheduled targets retain
-#        scan state for at least 3x their interval to avoid expiring between scans.
-#   include_alias/include_ip: Control label presence (reduce by disabling IP if alias grouping is enough).
-#   targets: Explicit allowlist of which network objects/ports may emit detail series. Alias must be unique; invalid
-#            entries abort config load (fail-fast).
+#   ttl: Expiry fallback without successful reconfirmation; does not control scan cadence or delay removal after
+#        a successful result confirms closure.
+#        Scheduled targets retain scan state for at least 3x their interval.
+#   include_alias/include_ip: False leaves that label empty; disabling IP collapses by alias/port/protocol.
+#   targets: Allowlist of network objects/ports that may emit presence-only open-port series. Alias must be unique;
+#            invalid entries abort config load. Rules without scheduled overlap remain usable through the Tasks API
+#            and produce a structured warning at startup/reload.
 # background_details:
 #   enabled: true
 #   series_budget: 2000
@@ -126,19 +131,9 @@ scanning:
 #   include_ip: true
 #   targets:
 #   - alias: "ssh-bastion-primary"
-#     cidr: "203.0.113.10/32"
+#     cidr: "192.168.1.10/32" # covered by the scheduled dmz_ssh target above
 #     protocol: "tcp"
 #     ports: ["22"]
-#   IPv4 — All addresses (use with caution!)
-#   - alias: "all-v4"
-#     cidr: "0.0.0.0/0"
-#     protocol: "tcp"
-#     ports: ["1-65535"]
-#   IPv6 — All addresses (use with caution!)
-#   - alias: "all-v6"
-#     cidr: "::/0"
-#     protocol: "tcp"
-#     ports: ["1-65535"]
 
 ############################
 # Tasks API Policy          #

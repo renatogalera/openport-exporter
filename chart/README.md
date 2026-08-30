@@ -22,7 +22,7 @@ The exporter periodically scans IPs/CIDRs with **Nmap** and exposes **low-cardin
 
 ```bash
 helm install my-openport-exporter oci://ghcr.io/renatogalera/openport-exporter 
-````
+```
 
 ### Custom values
 
@@ -49,6 +49,46 @@ See [`values.yaml`](./values.yaml) for the full set. Key options:
 | `containerSecurityContext` | `{}`         | Add `NET_RAW` for SYN scans                            |
 | `serviceMonitor.enabled`   | `false`      | Create a `ServiceMonitor`                              |
 | `config`                   | *(see file)* | Exporter configuration, mounted at `/app/config.yaml`  |
+
+### Scheduled scans and background details
+
+`config.targets` schedules recurring Nmap scans. In contrast,
+`config.background_details.targets` is only an allowlist for presence-only
+`openport_port_open` series; it never schedules scans. A recurring detail rule
+must overlap a scheduled target by network, protocol, and port. Results from a
+Tasks API scan may also populate the allowlist.
+
+```yaml
+config:
+  targets:
+    - name: ssh-network
+      target: 192.168.1.0/24
+      port_range: "22"
+      protocol: tcp
+      interval: 1h
+  background_details:
+    enabled: true
+    series_budget: 2000
+    ttl: 30m
+    include_alias: true
+    include_ip: true
+    targets:
+      - alias: ssh-bastion-primary
+        cidr: 192.168.1.10/32
+        protocol: tcp
+        ports: ["22"]
+```
+
+`interval` controls scan cadence. `ttl` is the expiry baseline; scheduled state
+uses `max(ttl, 3 × interval)`, so the example above retains state for at least
+three hours. A detail value of `1` means the latest accepted successful state
+reported the port open. Confirmed closure removes it immediately, while scan
+failures retain the last successful state until TTL. Setting `include_alias` or
+`include_ip` to `false` keeps the corresponding label with an empty value;
+without IP, series collapse by alias, port, and protocol.
+
+The exporter logs a warning for rules with no scheduled overlap, while keeping
+them valid for API-only scans. `series_budget` applies independently to each pod.
 
 ### Security (NET\_RAW for SYN)
 
@@ -101,6 +141,8 @@ serviceMonitor:
 * `openport_scans_failed_total{target,port_range,protocol,error_type}` *(Counter)*
 * `openport_last_scan_timestamp_seconds{target,port_range,protocol}` *(Gauge)*
 * `openport_port_state_changes_total{target,port_range,protocol,change_type}` *(Counter)*
+* `openport_port_open{alias,ip,port,protocol}` *(presence-only Gauge)*
+* `openport_details_series_dropped_total` *(Counter)*
 * Scheduler/Tasks:
 
   * `openport_scheduler_queue_size`
